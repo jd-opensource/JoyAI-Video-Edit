@@ -168,7 +168,7 @@ The default launcher:
 
 - binds to `0.0.0.0:8080`;
 - uses `cuda:0` by default;
-- places DiT, VAE encode/decode, pseudo encode, and postprocess on the same device by default;
+- places DiT, VAE encode/decode, pseudo-encode, and postprocess on the same device by default;
 - enables persistent TorchInductor, Triton, and CUDA caches under `deploy/deps/cache/`;
 - records generated sessions under `deploy/recordings/`.
 
