@@ -75,11 +75,7 @@ class FlowMatchDiscreteScheduler(SchedulerMixin, ConfigMixin):
         if schedule_timesteps is None:
             schedule_timesteps = self.timesteps
 
-        indices = (schedule_timesteps == timestep).nonzero()
-
-        pos = 1 if len(indices) > 1 else 0
-
-        return indices[pos].item()
+        return (schedule_timesteps == timestep).nonzero()[0].item()
 
     def _init_step_index(self, timestep):
         if isinstance(timestep, torch.Tensor):

@@ -6,8 +6,8 @@ import torch
 import torch.nn as nn
 
 try:
-    from joyomni_ops import fp8_scaled_mm, has_fp8, sgl_per_token_quant_fp8
-    _SGL_KERNEL_OK = bool(has_fp8())
+    from joyomni_ops import fp8_scaled_mm, sgl_per_token_quant_fp8
+    _SGL_KERNEL_OK = True
 except Exception:
     fp8_scaled_mm = None
     sgl_per_token_quant_fp8 = None
@@ -51,7 +51,7 @@ class Fp8Linear(nn.Module):
 
     @classmethod
     def from_linear(cls, lin: nn.Linear, out_dtype: torch.dtype = torch.bfloat16) -> "Fp8Linear":
-        assert available(), "joyomni_ops fp8 ops not available; cannot build Fp8Linear"
+        assert available(), "joyomni_ops not importable; cannot build Fp8Linear"
         w = lin.weight.data
         w_q, w_s = _quantize_weight_per_channel(w.to(torch.bfloat16))
         b = None

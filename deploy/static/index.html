@@ -25,9 +25,10 @@
     .topbar .brand-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); flex: 0 0 auto; }
     .topbar .brand { font-size: 18px; font-weight: 760; letter-spacing: .2px; }
     .topbar .tagline { font-size: 13px; color: var(--muted); }
-    .lang-toggle { margin-left: auto; cursor: pointer; font-size: 13px; font-weight: 700; color: #fff; background: var(--accent); border: 1px solid var(--accent); border-radius: 999px; padding: 7px 16px; display: inline-flex; align-items: center; gap: 6px; letter-spacing: .2px; box-shadow: 0 2px 8px rgba(242,100,63,.28); transition: transform .12s ease, box-shadow .12s ease, background .12s ease; }
-    .lang-toggle:hover { background: #e0532f; box-shadow: 0 3px 12px rgba(242,100,63,.42); transform: translateY(-1px); }
-    .lang-toggle:active { transform: translateY(0); }
+    .lang-seg { margin-left: auto; display: inline-flex; gap: 3px; }
+    .lang-seg button { cursor: pointer; font-size: 12px; font-weight: 600; color: #6a6a64; background: var(--panel-2); border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; }
+    .lang-seg button:hover { border-color: var(--accent); color: var(--accent); }
+    .lang-seg button.on { color: #fff; background: var(--accent); border-color: var(--accent); }
     .stage { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 22px; padding: 4px 28px 10px; }
     .vpanel { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); overflow: hidden; }
     .vpanel-head { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 16px; }
@@ -40,6 +41,10 @@
     .overlay { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; padding: 20px; color: #cfcfca; }
     .overlay .hint { font-size: 13px; color: #9a9a95; max-width: 320px; line-height: 1.5; text-wrap: balance; }
     .overlay .idle-ico { font-size: 30px; color: #6f6f6a; }
+    .res-banner { text-align: center; font-size: 14px; font-weight: 700; color: #231900; background: #f5b32b; border-top: 1px solid rgba(0,0,0,.18); border-bottom: 1px solid rgba(0,0,0,.24); padding: 9px 12px; line-height: 1.45; }
+    .res-banner .res-ico { margin-right: 6px; font-size: 15px; }
+    @keyframes joy-spin { to { transform: rotate(360deg); } }
+    .idle-ico.spin { display: inline-block; animation: joy-spin 1.1s linear infinite; }
     .wait-overlay { background: var(--media-bg); z-index: 3; }
     .wait-overlay .idle-ico { font-size: 40px; color: var(--accent); }
     .wait-overlay .hint { font-size: 15px; color: #d9d9d4; font-weight: 600; max-width: 380px; }
@@ -85,7 +90,7 @@
     .send-fab:disabled, .send-fab.busy { opacity: .5; cursor: not-allowed; }
     .send-fab.busy::before { content: "\22EF"; }
     .latency-row { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; margin: 8px 6px 0; font-size: 12px; color: var(--muted); }
-    .latency-row #netReadout, .latency-row #dispLatency { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .latency-row #netReadout, .latency-row #dispLatency, .latency-row #fpsReadout { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     .cmd-foot { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; margin: 8px 6px 0; font-size: 12px; color: var(--muted); }
     .cmd-foot .res-readout { white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     .cmd-foot .pe-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
@@ -152,8 +157,12 @@
   <span class="brand-dot"></span>
   <span class="brand">JoyAI-Video-Edit</span>
   <span class="tagline" data-i18n="tagline">流式视频编辑体验</span>
-  <button id="langToggle" type="button" class="lang-toggle">🌐 English</button>
+  <span id="langToggle" class="lang-seg" role="group" aria-label="Language">
+    <button type="button" data-lang="zh">中文</button>
+    <button type="button" data-lang="en">EN</button>
+  </span>
 </div>
+<div class="res-banner" id="resBanner" style="display:none"><span class="res-ico">⚠️</span><span id="resBannerText"></span></div>
 
 <div class="stage">
   <div class="vpanel">
@@ -182,7 +191,7 @@
     </div>
     <div class="media-box">
       <img id="outputImg" alt="编辑输出" data-i18n-alt="output_img_alt" />
-      <canvas id="outputCanvas" style="display:none; position:absolute; inset:0;"></canvas>
+      <canvas id="outputCanvas" style="display:none"></canvas>
       <video id="outputResult" playsinline controls style="display:none; position:absolute; inset:0; z-index:4;"></video>
       <button id="downloadBubble" type="button" class="download-bubble" style="display:none" data-i18n="download_done">✨ 编辑完成 · 下载</button>
       <div id="outputIdleOverlay" class="overlay">
@@ -193,8 +202,11 @@
         <div id="outputWaitIco" class="idle-ico">👤</div>
         <div id="outputWaitHint" class="hint" data-i18n="face_camera">请正对摄像头</div>
       </div>
+      <div id="outputStartOverlay" class="overlay wait-overlay" style="display:none">
+        <div class="idle-ico spin">⏳</div>
+        <div id="outputStartHint" class="hint" data-i18n="busy_starting">正在启动</div>
+      </div>
       <div id="outputToast" class="toast"></div>
-      <div id="dlHud" style="position:absolute; left:6px; bottom:6px; z-index:9; font:11px/1.4 monospace; color:#0f0; background:rgba(0,0,0,0.6); padding:2px 6px; border-radius:4px; pointer-events:none; max-width:96%; white-space:normal; word-break:break-all;"></div>
     </div>
     <div id="stageTimingsPanel" class="stage-timings-wrap" style="display:none">
       <div class="st-title" data-i18n="prof_title">性能分析（各阶段耗时 · 开启会略降性能）</div>
@@ -219,6 +231,7 @@
   <div class="latency-row">
     <span id="netReadout" class="keep-min">-</span>
     <span id="dispLatency" class="keep-min">-</span>
+    <span id="fpsReadout" class="keep-min">-</span>
     <span id="sendHint" class="send-hint keep-min"></span>
   </div>
   <div class="cmd-foot minimal">
@@ -228,26 +241,31 @@
     <span class="kvreset-field keep-min">
       <span data-i18n="upload_quality">上传清晰度</span>
       <span id="upqTier" class="qtier">
-        <button type="button" data-upq="0.4" data-i18n="q_low">低</button>
-        <button type="button" data-upq="0.6" class="on" data-i18n="q_mid">中</button>
-        <button type="button" data-upq="0.8" data-i18n="q_high">高</button>
+        <button type="button" data-upq="0.2" data-i18n="q_low">低</button>
+        <button type="button" data-upq="0.4" data-i18n="q_mid">中</button>
+        <button type="button" data-upq="0.6" class="on" data-i18n="q_high">高</button>
       </span>
     </span>
     <span class="kvreset-field keep-min">
       <span data-i18n="download_quality">下载清晰度</span>
       <span id="qtier" class="qtier">
         <button type="button" data-q="20" data-i18n="q_low">低</button>
-        <button type="button" data-q="60" data-i18n="q_mid">中</button>
-        <button type="button" data-q="90" data-i18n="q_high">高</button>
+        <button type="button" data-q="40" data-i18n="q_mid">中</button>
+        <button type="button" data-q="60" data-i18n="q_high">高</button>
         <button type="button" data-q="auto" class="on" data-i18n="q_auto">自动</button>
       </span>
-      <input id="downQualityUi" type="hidden" value="60" />
+      <input id="downQualityUi" type="hidden" />
     </span>
     <span class="kvreset-field keep-min">
       <span data-i18n="frame_speed">送帧速度</span>
       <span id="fpsTier" class="qtier">
+        <button type="button" data-fps="32">32</button>
+        <button type="button" data-fps="30">30</button>
+        <button type="button" data-fps="28">28</button>
         <button type="button" data-fps="24" class="on">24</button>
+        <button type="button" data-fps="20">20</button>
         <button type="button" data-fps="16">16</button>
+        <button type="button" data-fps="12">12</button>
         <button type="button" data-fps="8">8</button>
       </span>
     </span>
@@ -262,21 +280,21 @@
 
 <div class="legacy-hidden">
   <div class="row">
-    <div><input id="width" type="number" value="1248" /></div>
-    <div><input id="height" type="number" value="720" /></div>
+    <div><input id="width" type="number" value="840" /></div>
+    <div><input id="height" type="number" value="480" /></div>
   </div>
   <div class="row">
     <div><input id="cameraFps" type="number" value="24" min="1" max="60" /></div>
-    <div><input id="fps" type="number" value="24" min="1" max="24" /></div>
+    <div><input id="fps" type="number" value="24" min="1" max="32" /></div>
   </div>
   <div class="row">
-    <div><input id="quality" type="number" value="0.6" min="0.2" max="1" step="0.01" /></div>
+    <div><input id="quality" type="number" value="0.6" min="0.1" max="1" step="0.01" /></div>
   </div>
   <input id="steps" type="number" value="2" min="1" max="8" />
   <label><input id="smoothPlayback" type="checkbox" checked /> <span data-i18n="smooth_playback">平滑输出播放</span></label>
   <div id="playbackDelayWrap" class="row">
-    <div><input id="targetQueueDelayMs" type="number" value="500" min="0" max="5000" step="50" /></div>
-    <div><input id="maxQueueDelayMs" type="number" value="650" min="0" max="8000" step="50" /></div>
+    <div><input id="targetQueueDelayMs" type="number" value="200" min="0" max="5000" step="50" /></div>
+    <div><input id="maxQueueDelayMs" type="number" value="300" min="0" max="8000" step="50" /></div>
   </div>
   <input id="kvResetFrames" type="number" value="1080" min="0" step="1" />
   <label><input id="useMaxTemporalIds" type="checkbox" checked /> <span data-i18n="max_temporal">最大时序 ID</span></label>
@@ -299,14 +317,13 @@ const I18N = {
     camera_hint: "仅采集画面，不支持语音；指令请使用文字输入",
     output_img_alt: "编辑输出",
     download_done: "✨ 编辑完成 · 下载",
-    ref_thumb_alt: "参考图",
-    ref_lightbox_alt: "参考图放大",
     wait_edit_cmd: "等待编辑指令",
     face_camera: "请正对摄像头",
     prof_title: "性能分析（各阶段耗时 · 开启会略降性能）",
     prompt_ph: "描述你想要的编辑效果",
     net_label: "网络延迟",
     disp_label: "显示延迟",
+    fps_label: "发/收/显",
     pe_toggle: "提示词增强",
     gate_toggle: "人物在场检测",
     prof_toggle: "性能分析",
@@ -336,6 +353,7 @@ const I18N = {
     stage_q_enc: "排队·编码", stage_q_dit: "排队·DiT", stage_q_dec: "排队·解码",
     stage_q_pseudo: "排队·伪编码", stage_q_post: "排队·后处理",
     stage_ws: "WS 发送", stage_total: "服务端合计", stage_residence: "服务端驻留",
+    stage_enc_q: "编码队列", stage_ws_buf: "发送缓冲", stage_recv_q: "接收队列",
     busy_released: "已释放", busy_disconnected: "已断开", busy_conn_err: "连接错误",
     pe_fallback: " 回退", pe_error: " 错误",
     reset_count_changed: "检测到人数变化，重新编辑",
@@ -347,8 +365,9 @@ const I18N = {
     toast_finalizing: "✨ 编辑完成，正在生成可下载视频",
     edit_processing: "✨ 正在编辑",
     q_downgrade_auto: " · 已自动降到低画质", q_downgrade_hint: " · 建议降低画质",
-    pe_locked_rv2v: "参考图（rv2v）模式下不做提示词增强：参考图已指定目标，增强反而会改写掉、且增加延迟。移除参考图即可恢复。",
-    pe_hint: "提示词增强（Prompt Enhance）：对纯文本编辑生效；启动检测通过后在就绪帧上增强",
+    flow_drop_tail: " · 带宽不足，正在丢帧保延迟",
+    up_clamp_tail: " · 上行带宽不足，已临时降低上传画质",
+    res_notice: "本演示运行在 {res}，并非模型原生的 1248×720 分辨率，画质与编辑效果会略有下降",
   },
   en: {
     tagline: "Streaming video editing",
@@ -359,14 +378,13 @@ const I18N = {
     camera_hint: "Video only, no audio; type your instruction as text",
     output_img_alt: "Edited output",
     download_done: "✨ Done · Download",
-    ref_thumb_alt: "Reference",
-    ref_lightbox_alt: "Reference enlarged",
     wait_edit_cmd: "Waiting for an edit instruction",
     face_camera: "Face the camera",
     prof_title: "Profiling (per-stage timing · slight perf cost when on)",
     prompt_ph: "Describe the edit you want",
     net_label: "Network",
     disp_label: "Display lag",
+    fps_label: "out/in/disp",
     pe_toggle: "Prompt Enhance",
     gate_toggle: "Presence Gate",
     prof_toggle: "Profiling",
@@ -396,6 +414,7 @@ const I18N = {
     stage_q_enc: "Queue·encode", stage_q_dit: "Queue·DiT", stage_q_dec: "Queue·decode",
     stage_q_pseudo: "Queue·pseudo", stage_q_post: "Queue·post",
     stage_ws: "WS send", stage_total: "Server total", stage_residence: "Server residence",
+    stage_enc_q: "Encode queue", stage_ws_buf: "Send buffer", stage_recv_q: "Recv queue",
     busy_released: "Released", busy_disconnected: "Disconnected", busy_conn_err: "Connection error",
     pe_fallback: " fallback", pe_error: " error",
     reset_count_changed: "Person count changed, re-editing",
@@ -407,11 +426,12 @@ const I18N = {
     toast_finalizing: "✨ Done — generating the downloadable video",
     edit_processing: "✨ Editing",
     q_downgrade_auto: " · auto-lowered to low quality", q_downgrade_hint: " · consider lowering quality",
-    pe_locked_rv2v: "Prompt Enhance is off in reference-image (rv2v) mode: the reference already specifies the target, so enhancing would overwrite it and add latency. Remove the reference image to re-enable.",
-    pe_hint: "Prompt Enhance: applies to text-only edits; runs on the ready frame after the start check passes",
+    flow_drop_tail: " · bandwidth limited, dropping frames",
+    up_clamp_tail: " · uplink limited, upload quality lowered",
+    res_notice: "This demo runs at {res}, not the model's native 1248×720 resolution; visual quality and edit fidelity are slightly reduced",
   },
 };
-let currentLang = localStorage.getItem("joyomni_lang") || (String(navigator.language || "").startsWith("zh") ? "zh" : "en");
+let currentLang = localStorage.getItem("joyomni_lang") || "en";
 function t(key) {
   const d = I18N[currentLang] || I18N.zh;
   return (key in d) ? d[key] : (I18N.zh[key] !== undefined ? I18N.zh[key] : key);
@@ -435,12 +455,19 @@ function applyLang() {
     el.setAttribute("alt", t(el.getAttribute("data-i18n-alt")));
   }
   const langBtn = document.getElementById("langToggle");
-  if (langBtn) langBtn.textContent = currentLang === "en" ? "🌐 中文" : "🌐 English";
+  if (langBtn) {
+    for (const b of langBtn.querySelectorAll("button")) {
+      b.classList.toggle("on", b.getAttribute("data-lang") === currentLang);
+    }
+  }
   if (typeof renderPromptCases === "function") { try { renderPromptCases(); } catch (err) {} }
   if (typeof updateMetrics === "function") { try { updateMetrics(); } catch (err) {} }
+  if (typeof updateResBanner === "function") { try { updateResBanner(); } catch (err) {} }
 }
-function toggleLang() {
-  currentLang = currentLang === "en" ? "zh" : "en";
+function setLang(lang) {
+  if (lang !== "en" && lang !== "zh") return;
+  if (lang === currentLang) return;
+  currentLang = lang;
   localStorage.setItem("joyomni_lang", currentLang);
   applyLang();
 }
@@ -449,6 +476,7 @@ const camera = document.getElementById("camera");
 const capture = document.getElementById("capture");
 const outputImg = document.getElementById("outputImg");
 const outputCanvas = document.getElementById("outputCanvas");
+const outputCanvasCtx = outputCanvas.getContext("2d");
 const stageTimings = document.getElementById("stageTimings");
 const stageTimingsPanel = document.getElementById("stageTimingsPanel");
 const peResultEl = document.getElementById("peResult");
@@ -479,6 +507,7 @@ const outputToast = document.getElementById("outputToast");
 const sendHintEl = document.getElementById("sendHint");
 const netReadoutEl = document.getElementById("netReadout");
 const dispLatencyEl = document.getElementById("dispLatency");
+const fpsReadoutEl = document.getElementById("fpsReadout");
 const refSlot = document.getElementById("refSlot");
 const refThumbImg = document.getElementById("refThumbImg");
 const sceneChipsEl = document.getElementById("sceneChips");
@@ -491,6 +520,7 @@ function setSendBusy(busy, hint) {
     sendBtn.classList.toggle("busy", busy);
   }
   if (hint !== undefined && sendHintEl) sendHintEl.textContent = hint;
+  if (!busy) { const _so = document.getElementById("outputStartOverlay"); if (_so) _so.style.display = "none"; }
 }
 
 let outputToastTimer = null;
@@ -512,6 +542,31 @@ function showCameraOverlay(show) {
 function showOutputIdle(show) {
   if (outputIdleOverlay) outputIdleOverlay.style.display = show ? "" : "none";
   if (show && outputWaitOverlay) { outputWaitOverlay.style.display = "none"; outputWaitingFace = false; waitHintReason = null; }
+}
+function updateResBanner() {
+  const el = document.getElementById("resBanner");
+  const txt = document.getElementById("resBannerText");
+  const wEl = document.getElementById("width");
+  const hEl = document.getElementById("height");
+  if (!el || !txt || !wEl || !hEl) return;
+  const w = Number(wEl.value) || 0;
+  const h = Number(hEl.value) || 0;
+  if (!w || !h || w * h >= 720 * 1248 * 0.9) { el.style.display = "none"; return; }
+  txt.textContent = t("res_notice").replace("{res}", w + "×" + h);
+  el.style.display = "";
+}
+function showOutputStart(show, text) {
+  const ov = document.getElementById("outputStartOverlay");
+  if (!ov) return;
+  if (show) {
+    if (outputIdleOverlay) outputIdleOverlay.style.display = "none";
+    if (outputWaitOverlay) outputWaitOverlay.style.display = "none";
+    const el = document.getElementById("outputStartHint");
+    if (el && text !== undefined) el.textContent = text;
+    ov.style.display = "";
+  } else {
+    ov.style.display = "none";
+  }
 }
 
 const cropMaskEl = document.getElementById("cropMask");
@@ -562,7 +617,7 @@ let pePausedSend = false;
 let peDeferThisSend = false;
 let videoPullActive = false;
 let videoPullIdx = 0;
-let videoPullFps = 24;
+const videoPullFps = 24;
 let videoPullTotal = 0;
 const outputResult = document.getElementById("outputResult");
 let resultBlobUrl = null;
@@ -572,9 +627,7 @@ let resultSyncActive = false;
 let resultSyncHandlers = null;
 let peWatchdog = null;
 let finalizeWatchdog = null;
-let recordDrainTimer = null;
 function stopRecordDrain() {
-  if (recordDrainTimer) { clearInterval(recordDrainTimer); recordDrainTimer = null; }
   if (finalizeWatchdog) { clearTimeout(finalizeWatchdog); finalizeWatchdog = null; }
 }
 let startingRun = false;
@@ -583,9 +636,8 @@ let peCache = null;
 let pendingPeCacheKey = null;
 let outputPlaybackTimer = null;
 let outputPlaybackIntervalMs = null;
-const MAX_WS_BUFFERED_BYTES = 64 * 1024 * 1024;
-const DEFAULT_TARGET_OUTPUT_QUEUE_DELAY_MS = 500;
-const DEFAULT_MAX_OUTPUT_QUEUE_DELAY_MS = 650;
+const DEFAULT_TARGET_OUTPUT_QUEUE_DELAY_MS = 200;
+const DEFAULT_MAX_OUTPUT_QUEUE_DELAY_MS = 300;
 function targetOutputQueueDelayMs() {
   const el = document.getElementById("targetQueueDelayMs");
   const raw = el && el.value !== "" ? el.value : null;
@@ -600,7 +652,6 @@ function maxOutputQueueDelayMs() {
   return Number.isFinite(v) && v >= 0 ? v : DEFAULT_MAX_OUTPUT_QUEUE_DELAY_MS;
 }
 const MAX_BACKEND_PENDING_FRAMES = 32;
-let sendBackpressureSkips = 0;
 let sendRealtimeSkips = 0;
 let sentFrames = 0;
 let backendAckedFrames = 0;
@@ -631,179 +682,6 @@ let lastVideoQualityFrames = null;
 let sendActualFps = 0;
 let receiveActualFps = 0;
 let editActualFps = 0;
-
-const UPLINK_H264_CODEC = "avc1.42E01F";
-let uplinkH264Supported = null;
-let activeUplinkCodec = "jpeg";
-let uplinkEncoder = null;
-let uplinkEncoderError = false;
-let uplinkForceKeyframe = false;
-let uplinkFrameIndex = 0;
-let uplinkPendingMeta = [];
-
-async function probeUplinkH264() {
-  if (uplinkH264Supported !== null) return uplinkH264Supported;
-  try {
-    if (typeof VideoEncoder === "undefined" || typeof VideoFrame === "undefined") {
-      uplinkH264Supported = false;
-      return false;
-    }
-    const w = Number(document.getElementById("width").value) || 1248;
-    const h = Number(document.getElementById("height").value) || 720;
-    const support = await VideoEncoder.isConfigSupported({
-      codec: UPLINK_H264_CODEC,
-      width: w,
-      height: h,
-      latencyMode: "realtime",
-      avc: { format: "annexb" },
-    });
-    uplinkH264Supported = !!(support && support.supported);
-  } catch (err) {
-    uplinkH264Supported = false;
-  }
-  return uplinkH264Supported;
-}
-
-function teardownUplinkEncoder() {
-  if (uplinkEncoder) {
-    try { if (uplinkEncoder.state !== "closed") uplinkEncoder.close(); } catch (err) {}
-  }
-  uplinkEncoder = null;
-  uplinkEncoderError = false;
-  uplinkForceKeyframe = false;
-  uplinkFrameIndex = 0;
-  uplinkPendingMeta = [];
-}
-
-function setupUplinkEncoder() {
-  teardownUplinkEncoder();
-  const w = Number(document.getElementById("width").value);
-  const h = Number(document.getElementById("height").value);
-  const enc = new VideoEncoder({
-    output: (chunk, metadata) => {
-      try {
-        if (!ws || ws.readyState !== WebSocket.OPEN) { uplinkPendingMeta.shift(); return; }
-        const meta = uplinkPendingMeta.shift() || { seq: sentFrames + 1, t_capture_ms: Date.now() };
-        const buf = new ArrayBuffer(chunk.byteLength);
-        chunk.copyTo(buf);
-        ws.send(JSON.stringify({ type: "frame_meta", seq: meta.seq, t_capture_ms: meta.t_capture_ms }));
-        if (ws.readyState !== WebSocket.OPEN) return;
-        ws.send(buf);
-        sentFrames += 1;
-        sentFramesWindow += 1;
-        updateMetrics();
-      } catch (err) {
-        uplinkEncoderError = true;
-      }
-    },
-    error: (err) => { uplinkEncoderError = true; },
-  });
-  enc.configure({
-    codec: UPLINK_H264_CODEC,
-    width: w,
-    height: h,
-    latencyMode: "realtime",
-    bitrateMode: "variable",
-    framerate: sendTargetFps(),
-    avc: { format: "annexb" },
-  });
-  uplinkEncoder = enc;
-  uplinkForceKeyframe = true;
-  uplinkFrameIndex = 0;
-  uplinkPendingMeta = [];
-}
-
-const DOWNLINK_H264_CODEC = "avc1.42E01F";
-let downlinkH264Supported = null;
-let activeDownlinkCodec = "jpeg";
-let downlinkDecoder = null;
-let downlinkDecoderError = false;
-let downlinkSawKey = false;
-let downlinkPendingMeta = [];
-
-// --- downlink h264 diagnostics (on-screen HUD) ---
-const DL_BUILD = "dl-hud-1";
-let dlStat = { recv: 0, dropWait: 0, decodeCalls: 0, decodeThrow: 0, output: 0, bitmap: 0, bitmapErr: 0, draw: 0, lastErr: "" };
-function dlHudRender() {
-  const el = document.getElementById("dlHud");
-  if (!el) return;
-  const st = downlinkDecoder ? downlinkDecoder.state : "none";
-  const q = downlinkDecoder ? downlinkDecoder.decodeQueueSize : "-";
-  el.textContent =
-    `[${DL_BUILD}] codec=${activeDownlinkCodec} dec=${st} q=${q} sawKey=${downlinkSawKey ? 1 : 0}` +
-    ` | recv=${dlStat.recv} dropWait=${dlStat.dropWait} decode=${dlStat.decodeCalls} thr=${dlStat.decodeThrow}` +
-    ` out=${dlStat.output} bmp=${dlStat.bitmap}/${dlStat.bitmapErr} draw=${dlStat.draw}` +
-    (dlStat.lastErr ? ` | ERR:${dlStat.lastErr}` : "");
-}
-setInterval(dlHudRender, 500);
-
-
-async function probeDownlinkH264() {
-  if (downlinkH264Supported !== null) return downlinkH264Supported;
-  try {
-    if (typeof VideoDecoder === "undefined" || typeof EncodedVideoChunk === "undefined") {
-      downlinkH264Supported = false;
-      return false;
-    }
-    const w = Number(document.getElementById("width").value) || 1248;
-    const h = Number(document.getElementById("height").value) || 720;
-    const support = await VideoDecoder.isConfigSupported({
-      codec: DOWNLINK_H264_CODEC,
-      codedWidth: w,
-      codedHeight: h,
-      optimizeForLatency: true,
-      avc: { format: "annexb" },
-    });
-    downlinkH264Supported = !!(support && support.supported);
-  } catch (err) {
-    downlinkH264Supported = false;
-  }
-  return downlinkH264Supported;
-}
-
-function teardownDownlinkDecoder() {
-  if (downlinkDecoder) {
-    try { if (downlinkDecoder.state !== "closed") downlinkDecoder.close(); } catch (err) {}
-  }
-  downlinkDecoder = null;
-  downlinkDecoderError = false;
-  downlinkSawKey = false;
-  downlinkPendingMeta = [];
-}
-
-function setupDownlinkDecoder() {
-  teardownDownlinkDecoder();
-  const w = Number(document.getElementById("width").value);
-  const h = Number(document.getElementById("height").value);
-  const dec = new VideoDecoder({
-    output: (frame) => {
-      dlStat.output += 1;
-      const meta = downlinkPendingMeta.shift() || null;
-      try {
-        onDecodedOutputFrame(frame, meta);
-      } finally {
-        try { frame.close(); } catch (e) {}
-      }
-    },
-    error: (err) => {
-      downlinkDecoderError = true;
-      dlStat.lastErr = "decErr:" + (err && (err.message || err) || "unknown");
-      try { console.error("[downlink h264] VideoDecoder error:", err && (err.message || err), err); } catch (e) {}
-      try { showOutputToast("H264解码失败: " + (err && (err.message || err) || "unknown"), 6000); } catch (e) {}
-    },
-  });
-  dec.configure({
-    codec: DOWNLINK_H264_CODEC,
-    codedWidth: w,
-    codedHeight: h,
-    optimizeForLatency: true,
-    avc: { format: "annexb" },
-  });
-  downlinkDecoder = dec;
-  downlinkSawKey = false;
-  downlinkPendingMeta = [];
-}
-
 let sentFramesWindow = 0;
 let receivedFramesWindow = 0;
 let displayedFramesWindow = 0;
@@ -812,6 +690,24 @@ let editReceiveLatencyLastMs = null;
 let editLatencyLastMs = null;
 let netRttLastMs = null;
 let netPingTimer = null;
+let flowDropTotal = 0;
+let flowDropAt = 0;
+let upDelayMs = null;
+let upDelayHist = [];
+let downDelayMs = null;
+let downSkewMin = null;
+let downSkewAt = 0;
+let upClamped = false;
+let upClearStreak = 0;
+let upClearNeed = 4;
+let upDrainFactor = 1;
+let upDrainHigh = 0;
+let upDrainClear = 0;
+let upDrainNeed = 5;
+let upSkipCounter = 0;
+let upDropTotal = 0;
+let upDropAt = 0;
+let upResumeKeyframe = false;
 let serverChunkLastSec = null;
 let chunkProfileLast = null;
 let sessionProfileTimings = false;
@@ -837,6 +733,7 @@ function noteBackendAck(msg) {
   const framesOut = Number(msg && msg.frames_out);
   if (Number.isFinite(framesOut)) {
     backendOutFrames = Math.max(backendOutFrames, framesOut);
+    if (usingVideoFile && (videoPullActive || finalizeIsForResult)) updateUploadProgress();
   }
 }
 
@@ -857,8 +754,8 @@ function defaultCameraOrientation() {
 }
 function orientDims(o) {
   const d = SERVER_DEFAULTS || {};
-  const a = Number(d.width) || 1248;
-  const b = Number(d.height) || 720;
+  const a = Number(d.width) || 840;
+  const b = Number(d.height) || 480;
   const long = Math.max(a, b), short = Math.min(a, b);
   return o === "portrait" ? { width: short, height: long } : { width: long, height: short };
 }
@@ -904,7 +801,7 @@ function startNetPingTimer() {
   if (netPingTimer) clearInterval(netPingTimer);
   netPingTimer = setInterval(() => {
     if (ws && ws.readyState === WebSocket.OPEN) {
-      try { ws.send(JSON.stringify({ type: "ping", t: Date.now() })); } catch (err) {}
+      try { ws.send(JSON.stringify({ type: "ping", t: Date.now(), recv: receivedFrames, rtt: netRttLastMs })); } catch (err) {}
     }
     autoQualityTick();
   }, 1000);
@@ -990,10 +887,6 @@ function outputPlaybackFps() {
   return Math.max(1, Math.min(configured, measured || configured));
 }
 
-function outputQueueDelayMs() {
-  return outputFrameQueue.length * (1000 / outputPlaybackFps());
-}
-
 function outputQueueLimitFrames() {
   return Math.max(4, Math.ceil(outputPlaybackFps() * maxOutputQueueDelayMs() / 1000));
 }
@@ -1033,6 +926,13 @@ function renderStageTimings() {
   const cards = [];
   const push = (label, key, tone = "") => cards.push(statCell(label, fmt(ms(key), "ms"), tone));
 
+  const _encQ = (typeof upEncoder !== "undefined" && upEncoder) ? (upEncoder.encodeQueueSize || 0) : 0;
+  const _wsBuf = (ws && ws.readyState === WebSocket.OPEN) ? (ws.bufferedAmount || 0) : 0;
+  cards.push(statCell(t("stage_enc_q"), String(_encQ), _encQ >= 3 ? "warn" : ""));
+  cards.push(statCell(t("stage_ws_buf"), (_wsBuf / 1024).toFixed(0) + " KB", _wsBuf > 131072 ? "warn" : ""));
+  const _recvQ = (typeof outputFrameQueue !== "undefined" && outputFrameQueue) ? outputFrameQueue.length : 0;
+  cards.push(statCell(t("stage_recv_q"), _recvQ + " · " + (outCodecH264 ? "h264" : "mjpeg"), _recvQ >= 16 ? "warn" : ""));
+
   if (Number.isFinite(Number(p.jpeg_decode_ms))) {
     cards.push(statCell(t("stage_jpeg"), fmt(Number(p.jpeg_decode_ms), "ms")));
   }
@@ -1059,14 +959,20 @@ function updateMetrics() {
   renderStageTimings();
   if (netReadoutEl) {
     const _rtt = netRttLastMs;
-    const _hi = _rtt !== null && _rtt !== undefined && _rtt > 333;
-    const _tail = _hi ? (autoQuality ? t("q_downgrade_auto") : t("q_downgrade_hint")) : "";
+    const _hi = _rtt !== null && _rtt !== undefined && _rtt > 300;
+    const _fd = flowDropAt > 0 && Date.now() - flowDropAt < 3000;
+    const _uc = upClamped || upDrainFactor < 1 || (upDropAt > 0 && Date.now() - upDropAt < 3000);
+    let _tail = "";
+    if (_hi) _tail = autoQuality ? (autoQTier < 2 ? t("q_downgrade_auto") : "") : t("q_downgrade_hint");
+    if (_uc) _tail = t("up_clamp_tail");
+    if (_fd) _tail = t("flow_drop_tail");
     netReadoutEl.textContent = t("net_label") + " " + fmt(_rtt, "ms") + _tail;
-    netReadoutEl.classList.toggle("net-warn", _hi);
+    netReadoutEl.classList.toggle("net-warn", _hi || _fd || _uc);
   }
   if (dispLatencyEl) {
     dispLatencyEl.textContent = t("disp_label") + " " + fmt(editLatencyLastMs, "ms");
   }
+  fpsReadoutEl.textContent = t("fps_label") + " " + sendActualFps.toFixed(1) + "/" + receiveActualFps.toFixed(1) + "/" + editActualFps.toFixed(1);
 }
 
 function updateRateMeters() {
@@ -1085,8 +991,8 @@ function updateRateMeters() {
 
 function disposeItem(item) {
   if (!item) return;
+  if (item.bmp) { try { item.bmp.close(); } catch (e) {} item.bmp = null; }
   if (item.url) { try { URL.revokeObjectURL(item.url); } catch (e) {} item.url = null; }
-  if (item.bitmap) { try { item.bitmap.close(); } catch (e) {} item.bitmap = null; }
 }
 
 function blankOutputPane() {
@@ -1095,10 +1001,7 @@ function blankOutputPane() {
   if (pendingRevokeUrl) { URL.revokeObjectURL(pendingRevokeUrl); pendingRevokeUrl = null; }
   outputImg.onload = outputImg.onerror = null;
   outputImg.removeAttribute("src");
-  if (outputCanvas) {
-    const ctx = outputCanvas.getContext("2d");
-    if (ctx) ctx.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
-  }
+  outputCanvasCtx.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
 }
 
 function displayOutputFrame(item) {  if (!item) return;
@@ -1108,13 +1011,15 @@ function displayOutputFrame(item) {  if (!item) return;
     waitHintReason = null;
     if (outputWaitOverlay) outputWaitOverlay.style.display = "none";
   }
-  if (item.bitmap) {
-    drawBitmapToOutput(item.bitmap);
-    try { item.bitmap.close(); } catch (e) {}
-    item.bitmap = null;
+  if (item.bmp) {
+    if (outputCanvas.width !== item.bmp.width || outputCanvas.height !== item.bmp.height) {
+      outputCanvas.width = item.bmp.width;
+      outputCanvas.height = item.bmp.height;
+    }
+    outputCanvasCtx.drawImage(item.bmp, 0, 0);
+    item.bmp.close();
+    item.bmp = null;
   } else {
-    if (outputCanvas) outputCanvas.style.display = "none";
-    outputImg.style.display = "";
     if (pendingRevokeUrl) { URL.revokeObjectURL(pendingRevokeUrl); pendingRevokeUrl = null; }
     pendingRevokeUrl = lastObjectUrl;
     lastObjectUrl = item.url;
@@ -1137,19 +1042,6 @@ function displayOutputFrame(item) {  if (!item) return;
   updateMetrics();
 }
 
-function drawBitmapToOutput(bitmap) {
-  if (!outputCanvas) return;
-  if (outputCanvas.width !== bitmap.width || outputCanvas.height !== bitmap.height) {
-    outputCanvas.width = bitmap.width;
-    outputCanvas.height = bitmap.height;
-  }
-  const ctx = outputCanvas.getContext("2d");
-  ctx.drawImage(bitmap, 0, 0);
-  dlStat.draw += 1;
-  outputImg.style.display = "none";
-  outputCanvas.style.display = "";
-}
-
 function effectivePlaybackIntervalMs() {
   const base = Math.max(16, Math.round(1000 / outputPlaybackFps()));
   const q = outputFrameQueue.length;
@@ -1161,7 +1053,7 @@ function effectivePlaybackIntervalMs() {
 }
 
 function alignTargetMs() {
-  return Math.min(2500, Math.max(300, alignMaxAgeMs + 120));
+  return Math.min(2500, Math.max(200, alignMaxAgeMs + targetOutputQueueDelayMs()));
 }
 
 function pumpOutputFrame() {
@@ -1204,7 +1096,6 @@ function resetRunMetrics() {
   backendOutFrames = 0;
   receivedFrames = 0;
   displayedFrames = 0;
-  sendBackpressureSkips = 0;
   sendRealtimeSkips = 0;
   tickInFlight = false;
   sentFramesWindow = 0;
@@ -1217,6 +1108,16 @@ function resetRunMetrics() {
   editReceiveLatencyLastMs = null;
   editLatencyLastMs = null;
   netRttLastMs = null;
+  upDelayMs = null;
+  upDelayHist = [];
+  downDelayMs = null;
+  downSkewMin = null;
+  downSkewAt = 0;
+  upClearStreak = 0;
+  upDrainHigh = 0;
+  upDrainClear = 0;
+  upDrainNeed = 5;
+  upResumeKeyframe = false;
   serverChunkLastSec = null;
   chunkProfileLast = null;
   lastWsSendMs = null;
@@ -1251,28 +1152,196 @@ function trimOutputQueueForLatency() {
   }
 }
 
-function enqueueOutputFrame(frame, meta) {
-  if (usingVideoFile) { updateUploadProgress(); return; }
-  enqueueOutputItem({ url: URL.createObjectURL(frame), meta, receivedAtMs: Date.now() }, meta);
+let h264DecodeOk = false;
+if (typeof VideoDecoder !== "undefined") {
+  VideoDecoder.isConfigSupported({ codec: "avc1.640028", optimizeForLatency: true })
+    .then((s) => { h264DecodeOk = !!(s && s.supported); })
+    .catch(() => {});
+}
+let outCodecH264 = false;
+let outDecoder = null;
+let outDecSeq = 0;
+const outMetaByTs = new Map();
+
+let upCodecH264 = false;
+let upEncoder = null;
+const UPLINK_KEYFRAME_INTERVAL = 8;
+let upSeq = 0;
+const upPendingByTs = new Map();
+
+const UP_CLAMP_Q = 0.2;
+
+function effectiveUpQuality() {
+  const q = Number(document.getElementById("quality").value) || 0.4;
+  return upClamped ? Math.min(q, UP_CLAMP_Q) : q;
 }
 
-function onDecodedOutputFrame(videoFrame, meta) {
-  receivedFrames += 1;
-  receivedFramesWindow += 1;
-  if (meta) {
-    const latency = Date.now() - Number(meta.t_capture_ms || Date.now());
-    editReceiveLatencyLastMs = latency;
-    serverChunkLastSec = Number(meta.server_elapsed || 0);
-    chunkProfileLast = meta.profile || chunkProfileLast;
+function upEncoderBitrate(width, height) {
+  const REF_PX = 1248 * 720;
+  const REF_BITRATE = (effectiveUpQuality() || 0.4) * 4000000 * upDrainFactor;
+  const REF_FPS = 16;
+  return Math.round(REF_BITRATE * (width * height / REF_PX) * Math.sqrt(sendTargetFps() / REF_FPS));
+}
+
+function uplinkCongestionTick() {
+  if (!(ws && ws.readyState === WebSocket.OPEN && sessionGranted)) return;
+  if (usingVideoFile) return;
+  const buf = ws.bufferedAmount || 0;
+  const upLow = upDelayHist.length
+    ? Math.min.apply(null, upDelayHist.slice(-3))
+    : null;
+  const congested = (upLow !== null && upLow > 350) || buf > 262144;
+  if (!upClamped) {
+    if (congested && effectiveUpQuality() > UP_CLAMP_Q + 0.001) {
+      upClamped = true;
+      upClearStreak = 0;
+      upClearNeed = Math.min(60, upClearNeed * 2);
+      try { resetUplinkEncoder(); } catch (e) {}
+      updateMetrics();
+    }
+  } else {
+    const clear = (upLow === null || upLow < 120) && buf < 65536;
+    upClearStreak = clear ? upClearStreak + 1 : 0;
+    if (upClearStreak >= upClearNeed) {
+      upClamped = false;
+      upClearStreak = 0;
+      try { resetUplinkEncoder(); } catch (e) {}
+      updateMetrics();
+    }
   }
-  if (usingVideoFile) { updateUploadProgress(); return; }
-  createImageBitmap(videoFrame).then((bitmap) => {
-    dlStat.bitmap += 1;
-    enqueueOutputItem({ bitmap, meta, receivedAtMs: Date.now() }, meta);
-  }).catch((e) => { dlStat.bitmapErr += 1; dlStat.lastErr = "bmp:" + (e && (e.message || e) || "?"); });
+  if (upLow !== null && upLow > 600) {
+    upDrainClear = 0;
+    upDrainHigh += 1;
+    if (upDrainHigh >= 3 && upDrainFactor > 0.25) {
+      upDrainFactor /= 2;
+      upDrainHigh = 0;
+      try { resetUplinkEncoder(); } catch (e) {}
+      updateMetrics();
+    }
+  } else if ((upLow === null || upLow < 200) && buf < 65536) {
+    upDrainHigh = 0;
+    if (upDrainFactor < 1) {
+      upDrainClear += 1;
+      if (upDrainClear >= upDrainNeed) {
+        upDrainFactor = Math.min(1, upDrainFactor * 2);
+        upDrainClear = 0;
+        upDrainNeed = Math.min(15, upDrainNeed * 2);
+        try { resetUplinkEncoder(); } catch (e) {}
+        updateMetrics();
+      }
+    }
+  } else {
+    upDrainHigh = 0;
+    upDrainClear = 0;
+  }
 }
 
-function enqueueOutputItem(item, meta) {
+function upEncoderConfig(width, height) {
+  return {
+    codec: "avc1.42E028",
+    width,
+    height,
+    bitrate: upEncoderBitrate(width, height),
+    framerate: sendTargetFps(),
+    latencyMode: "realtime",
+    avc: { format: "annexb" },
+  };
+}
+
+function resetUplinkEncoder() {
+  if (upEncoder && upEncoder.state !== "closed") {
+    try { upEncoder.close(); } catch (e) {}
+  }
+  upEncoder = null;
+  upSeq = 0;
+  upPendingByTs.clear();
+}
+
+function ensureUplinkEncoder(width, height) {
+  if (upEncoder && upEncoder.state === "configured") return;
+  upEncoder = new VideoEncoder({
+    output: (chunk) => {
+      const info = upPendingByTs.get(chunk.timestamp);
+      upPendingByTs.delete(chunk.timestamp);
+      if (!info || !ws || ws.readyState !== WebSocket.OPEN) return;
+      if ((ws.bufferedAmount || 0) > 786432) {
+        upDropTotal += 1;
+        upDropAt = Date.now();
+        upResumeKeyframe = true;
+        return;
+      }
+      const buf = new ArrayBuffer(chunk.byteLength);
+      chunk.copyTo(buf);
+      try {
+        ws.send(JSON.stringify({ type: "frame_meta", seq: info.seq, t_capture_ms: info.t_capture_ms }));
+        ws.send(buf);
+      } catch (e) {
+        return;
+      }
+      sentFrames += 1;
+      sentFramesWindow += 1;
+      updateMetrics();
+    },
+    error: (e) => { console.error("VideoEncoder", e); },
+  });
+  upEncoder.configure(upEncoderConfig(width, height));
+}
+
+function encodeUplinkFrame(width, height) {
+  upSkipCounter += 1;
+  const _mod = upDrainFactor <= 0.25 ? 3 : (upDrainFactor <= 0.5 ? 2 : 1);
+  if (_mod > 1 && (upSkipCounter % _mod) !== 0) return;
+  drawCaptureFrame(width, height);
+  ensureUplinkEncoder(width, height);
+  const seq = ++upSeq;
+  upPendingByTs.set(seq, { seq, t_capture_ms: Date.now() });
+  let forceKey = false;
+  if (upResumeKeyframe && ws && (ws.bufferedAmount || 0) < 131072) {
+    forceKey = true;
+    upResumeKeyframe = false;
+  }
+  const vf = new VideoFrame(capture, { timestamp: seq });
+  upEncoder.encode(vf, { keyFrame: forceKey || seq === 1 || seq % UPLINK_KEYFRAME_INTERVAL === 0 });
+  vf.close();
+}
+
+function resetOutputDecoder() {
+  if (outDecoder && outDecoder.state !== "closed") {
+    try { outDecoder.close(); } catch (e) {}
+  }
+  outDecoder = null;
+  outDecSeq = 0;
+  outMetaByTs.clear();
+}
+
+function feedOutputH264(buf, meta) {
+  if (!outDecoder || outDecoder.state === "closed") {
+    outDecoder = new VideoDecoder({
+      output: (frame) => {
+        const m = outMetaByTs.get(frame.timestamp);
+        outMetaByTs.delete(frame.timestamp);
+        createImageBitmap(frame).then((bmp) => {
+          frame.close();
+          enqueueOutputFrame(bmp, m);
+        }, () => { frame.close(); });
+      },
+      error: (e) => { console.error("VideoDecoder", e); },
+    });
+    outDecoder.configure({ codec: "avc1.640028", optimizeForLatency: true });
+    outDecSeq = 0;
+    outMetaByTs.clear();
+  }
+  const key = !!(meta && meta.key);
+  if (outDecSeq === 0 && !key) return;
+  const ts = ++outDecSeq;
+  if (meta) outMetaByTs.set(ts, meta);
+  outDecoder.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: ts, data: buf }));
+}
+
+function enqueueOutputFrame(frame, meta) {
+  const item = frame instanceof ImageBitmap
+    ? { bmp: frame, meta, receivedAtMs: Date.now() }
+    : { url: URL.createObjectURL(frame), meta, receivedAtMs: Date.now() };
   if (!smoothPlaybackEnabled()) {
     displayOutputFrame(item);
     return;
@@ -1295,7 +1364,7 @@ function enqueueOutputItem(item, meta) {
     }
     outputFrameQueue[i] = item;
   }
-  while (outputFrameQueue.length > 120) {
+  while (outputFrameQueue.length > (outCodecH264 ? 32 : 120)) {
     const dropped = outputFrameQueue.shift();
     if (dropped) { disposeItem(dropped); outputQueueDroppedFrames += 1; }
   }
@@ -1380,6 +1449,12 @@ async function ensureCamera() {
   await camera.play();
   const settings = getCameraSettings();
   cameraTrackFps = settings.frameRate || null;
+  const camVW = camera.videoWidth || 0;
+  const camVH = camera.videoHeight || 0;
+  if (camVW && camVH) {
+    const want = camVH > camVW ? "portrait" : "landscape";
+    if (currentOrientation() !== want) applyOrientation(want);
+  }
   updateMetrics();
   updateCropMask();
   if (camera.requestVideoFrameCallback) {
@@ -1387,7 +1462,7 @@ async function ensureCamera() {
   }
 }
 
-function drawFrameToCanvas(width, height) {
+function drawCaptureFrame(width, height) {
   capture.width = width;
   capture.height = height;
   const ctx = capture.getContext("2d");
@@ -1418,7 +1493,7 @@ function drawFrameToCanvas(width, height) {
 }
 
 function frameBlob(width, height, quality) {
-  drawFrameToCanvas(width, height);
+  drawCaptureFrame(width, height);
   return new Promise(resolve => capture.toBlob(resolve, "image/jpeg", quality));
 }
 
@@ -1437,37 +1512,14 @@ async function tick() {
       updateMetrics();
       return;
     }
-    if (ws.bufferedAmount > MAX_WS_BUFFERED_BYTES) {
-      sendBackpressureSkips += 1;
+    const width = Number(document.getElementById("width").value);
+    const height = Number(document.getElementById("height").value);
+    const quality = Number(document.getElementById("quality").value);
+    if (upCodecH264) {
+      encodeUplinkFrame(width, height);
       updateMetrics();
       return;
     }
-    const width = Number(document.getElementById("width").value);
-    const height = Number(document.getElementById("height").value);
-    if (activeUplinkCodec === "h264") {
-      if (!uplinkEncoder || uplinkEncoderError) {
-        sendRealtimeSkips += 1;
-        updateMetrics();
-        return;
-      }
-      const seq = sentFrames + 1;
-      const tCaptureMs = Date.now();
-      try {
-        drawFrameToCanvas(width, height);
-        const vf = new VideoFrame(capture, { timestamp: uplinkFrameIndex * 1000 });
-        uplinkFrameIndex += 1;
-        const keyFrame = uplinkForceKeyframe || (uplinkFrameIndex % (sendTargetFps() * 2) === 1);
-        uplinkForceKeyframe = false;
-        uplinkPendingMeta.push({ seq, t_capture_ms: tCaptureMs });
-        uplinkEncoder.encode(vf, { keyFrame });
-        vf.close();
-      } catch (err) {
-        uplinkEncoderError = true;
-        uplinkForceKeyframe = true;
-      }
-      return;
-    }
-    const quality = Number(document.getElementById("quality").value);
     const blob = await frameBlob(width, height, quality);
     if (!blob || ws.readyState !== WebSocket.OPEN) return;
     const seq = sentFrames + 1;
@@ -1496,7 +1548,7 @@ function seekVideoTo(timeSec) {
     setTimeout(finish, 400);
   });
 }
-async function sendCurrentVideoFrame() {
+async function sendCurrentVideoFrame(mediaTimeSec) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   const width = Number(document.getElementById("width").value);
   const height = Number(document.getElementById("height").value);
@@ -1504,8 +1556,9 @@ async function sendCurrentVideoFrame() {
   const blob = await frameBlob(width, height, quality);
   if (!blob || ws.readyState !== WebSocket.OPEN) return false;
   const seq = sentFrames + 1;
+  const tCaptureMs = Math.round(mediaTimeSec * 1000);
   try {
-    ws.send(JSON.stringify({ type: "frame_meta", seq, t_capture_ms: Date.now() }));
+    ws.send(JSON.stringify({ type: "frame_meta", seq, t_capture_ms: tCaptureMs }));
     if (ws.readyState !== WebSocket.OPEN) return false;
     ws.send(blob);
   } catch (err) {
@@ -1527,14 +1580,14 @@ async function pullNextVideoFrame() {
   }
   const frameStartMs = Date.now();
   const intervalMs = 1000 / Math.max(1, videoPullFps);
-  if (backendPendingFrames() >= MAX_BACKEND_PENDING_FRAMES || ws.bufferedAmount > MAX_WS_BUFFERED_BYTES) {
+  if (backendPendingFrames() >= MAX_BACKEND_PENDING_FRAMES) {
     setTimeout(() => { pullNextVideoFrame(); }, 30);
     return;
   }
   const t = videoPullIdx / videoPullFps;
   await seekVideoTo(t);
   if (!videoPullActive || pePausedSend) return;
-  const ok = await sendCurrentVideoFrame();
+  const ok = await sendCurrentVideoFrame(t);
   if (!videoPullActive) return;
   if (ok) videoPullIdx += 1;
   const spent = Date.now() - frameStartMs;
@@ -1542,7 +1595,6 @@ async function pullNextVideoFrame() {
   setTimeout(() => { pullNextVideoFrame(); }, wait);
 }
 function startVideoPull() {
-  videoPullFps = sendTargetFps();
   const dur = (Number.isFinite(camera.duration) && camera.duration > 0) ? camera.duration : 0;
   videoPullTotal = dur > 0 ? Math.max(1, Math.ceil(dur * videoPullFps)) : Number.MAX_SAFE_INTEGER;
   videoPullIdx = 0;
@@ -1588,6 +1640,13 @@ async function beginSession() {
     pendingPeCacheKey = null;
     hidePeResult();
   }
+  upCodecH264 = false;
+  if (!usingVideoFile && typeof VideoEncoder !== "undefined") {
+    try {
+      const s = await VideoEncoder.isConfigSupported(upEncoderConfig(width, height));
+      upCodecH264 = !!(s && s.supported);
+    } catch (e) {}
+  }
   const startPayload = {
     type: "start",
     prompt: rawPrompt,
@@ -1596,30 +1655,25 @@ async function beginSession() {
     num_inference_steps: Number(document.getElementById("steps").value),
     use_pe: usePe,
     gate_enabled: faceGateDebugEnabled(),
-    seed: 42,
+    seed: SERVER_DEFAULTS.seed,
     kv_reset_frames: Math.max(0, Math.floor(Number(document.getElementById("kvResetFrames").value) || 0)),
-    output_quality: Math.max(1, Math.min(100, Math.floor(Number((document.getElementById("downQualityUi") || {}).value) || 60))),
-    no_person_blank: faceGateDebugEnabled(),
-    require_face: faceGateDebugEnabled(),
-    person_count_reedit: faceGateDebugEnabled()
+    output_quality: Number(downQualityUi.value),
+    fps: sendTargetFps(),
+    output_codec: h264DecodeOk ? "h264" : "mjpeg",
+    input_codec: upCodecH264 ? "h264" : "mjpeg"
   };
   if (usingVideoFile) {
+    startPayload.source = "file";
     startPayload.gate_enabled = false;
-    startPayload.no_person_blank = false;
-    startPayload.require_face = false;
-    startPayload.person_count_reedit = false;
   }
   if (cachedEnhancedPrompt) startPayload.enhanced_prompt = cachedEnhancedPrompt;
   if (refImage) startPayload.ref_image = refImage;
   const maxTemporalIds = maxTemporalIdsValue();
   if (maxTemporalIds !== null) startPayload.max_temporal_ids = maxTemporalIds;
   startPayload.freeze_kv_on_static = document.getElementById("freezeKvOnStatic").checked;
-  startPayload.static_diff_thresh = parseFloat(document.getElementById("staticDiffThresh").value) || 2.0;
+  const sdt = parseFloat(document.getElementById("staticDiffThresh").value);
+  startPayload.static_diff_thresh = Number.isFinite(sdt) ? sdt : 0.5;
   startPayload.profile_timings = document.getElementById("profileTimings").checked;
-  const _h264ok = !usingVideoFile && await probeUplinkH264();
-  startPayload.uplink_codec = _h264ok ? "h264" : "jpeg";
-  const _dlh264ok = !usingVideoFile && await probeDownlinkH264();
-  startPayload.downlink_codec = _dlh264ok ? "h264" : "jpeg";
   sessionProfileTimings = startPayload.profile_timings;
   stageTimingsPanel.style.display = sessionProfileTimings ? "" : "none";
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
@@ -1630,6 +1684,7 @@ async function beginSession() {
 async function start() {
   startingRun = true;
   setSendBusy(true, t("busy_starting"));
+  showOutputStart(true, t("busy_starting"));
   try {
     await ensureCamera();
   } catch (err) {
@@ -1655,22 +1710,23 @@ async function start() {
       if (msg.type === "session_granted") {
         sessionGranted = true;
         setSendBusy(true, t("busy_starting"));
+        showOutputStart(true, t("busy_starting"));
         beginSession();
         return;
       }
       if (msg.type === "started") {
-        activeUplinkCodec = (msg.uplink_codec === "h264") ? "h264" : "jpeg";
-        teardownUplinkEncoder();
-        if (activeUplinkCodec === "h264") {
-          try { setupUplinkEncoder(); }
-          catch (err) { activeUplinkCodec = "jpeg"; teardownUplinkEncoder(); }
+        if (Number(msg.width) > 0 && Number(msg.height) > 0) {
+          document.getElementById("width").value = msg.width;
+          document.getElementById("height").value = msg.height;
+          updateCropMask();
+          updateResBanner();
         }
-        activeDownlinkCodec = (msg.downlink_codec === "h264") ? "h264" : "jpeg";
-        teardownDownlinkDecoder();
-        if (activeDownlinkCodec === "h264") {
-          try { setupDownlinkDecoder(); }
-          catch (err) { activeDownlinkCodec = "jpeg"; teardownDownlinkDecoder(); }
-        }
+        outCodecH264 = msg.output_codec === "h264";
+        resetOutputDecoder();
+        outputImg.style.display = outCodecH264 ? "none" : "";
+        outputCanvas.style.display = outCodecH264 ? "" : "none";
+        upCodecH264 = msg.input_codec === "h264";
+        resetUplinkEncoder();
         if (usingVideoFile) {
           try { camera.pause(); } catch (err) {}
           try { camera.currentTime = 0; } catch (err) {}
@@ -1687,7 +1743,7 @@ async function start() {
           ensureOutputPlaybackTimer(true);
           startNetPingTimer();
           await seekVideoTo(0);
-          await sendCurrentVideoFrame();
+          await sendCurrentVideoFrame(0);
         } else {
           startFrameTimer();
         }
@@ -1698,8 +1754,29 @@ async function start() {
         const t = Number(msg.t);
         if (Number.isFinite(t)) {
           netRttLastMs = Math.max(0, Date.now() - t);
-          updateMetrics();
         }
+        const up = Number(msg.up_ms);
+        upDelayMs = Number.isFinite(up) ? up : null;
+        if (upDelayMs !== null) {
+          upDelayHist.push(upDelayMs);
+          if (upDelayHist.length > 4) upDelayHist.shift();
+        }
+        const ts = Number(msg.ts);
+        if (Number.isFinite(ts)) {
+          let skew = Date.now() - ts;
+          if (downSkewMin !== null) downSkewMin += 0.5 * Math.max(0, Date.now() - downSkewAt) / 1000;
+          if (downSkewMin === null || skew < downSkewMin) downSkewMin = skew;
+          downSkewAt = Date.now();
+          downDelayMs = Math.max(0, skew - downSkewMin);
+        }
+        uplinkCongestionTick();
+        updateMetrics();
+        return;
+      }
+      if (msg.type === "flow_drop") {
+        flowDropTotal = Number(msg.dropped_total) || (flowDropTotal + 1);
+        flowDropAt = Date.now();
+        updateMetrics();
         return;
       }
       if (msg.type === "output_frame") {
@@ -1714,12 +1791,7 @@ async function start() {
         if (peWatchdog) { clearTimeout(peWatchdog); peWatchdog = null; }
         pePausedSend = false;
         clearOutputQueue();
-        // Reset the "already shown" high-water mark instead of pinning it to
-        // Date.now(): the queue is already cleared here, and under high network
-        // latency the edited frames the server sends next carry t_capture_ms
-        // stamps from ~RTT ago, which are < Date.now() and would all be dropped
-        // as stale at the enqueue guard -> output pane stays black forever.
-        lastShownCaptureMs = 0;
+        lastShownCaptureMs = Date.now();
         alignMaxAgeMs = 0;
         if (usingVideoFile) {
           try { camera.pause(); } catch (err) {}
@@ -1817,6 +1889,7 @@ async function start() {
         return;
       }
       if (msg.type === "chunk_done") {
+        try { ws.send(JSON.stringify({ type: "ack", recv: receivedFrames })); } catch (err) {}
         if (
           chunkProfileLast &&
           (msg.ws_send_s !== undefined || msg.server_residence_s !== undefined) &&
@@ -1839,36 +1912,13 @@ async function start() {
       }
       return;
     }
+    if (startingRun) return;
     const meta = pendingOutputMeta;
     pendingOutputMeta = null;
-    const frameCodec = (meta && meta.codec) || "jpeg";
-    if (frameCodec === "h264" && activeDownlinkCodec === "h264") {
-      dlStat.recv += 1;
-      if (!downlinkDecoder || downlinkDecoderError) { dlStat.lastErr = downlinkDecoderError ? "decErrFlag" : "noDecoder"; return; }
-      const isKey = !!(meta && meta.key);
-      if (!downlinkSawKey && !isKey) { dlStat.dropWait += 1; return; }
-      if (isKey) downlinkSawKey = true;
-      const bytes = (event.data instanceof ArrayBuffer) ? new Uint8Array(event.data) : new Uint8Array(await event.data.arrayBuffer());
-      try {
-        const chunk = new EncodedVideoChunk({
-          type: isKey ? "key" : "delta",
-          timestamp: (meta && Number(meta.source_seq)) ? Number(meta.source_seq) * 1000 : 0,
-          data: bytes,
-        });
-        downlinkPendingMeta.push(meta);
-        downlinkDecoder.decode(chunk);
-        dlStat.decodeCalls += 1;
-      } catch (err) {
-        downlinkDecoderError = true;
-        downlinkPendingMeta = [];
-        dlStat.decodeThrow += 1;
-        dlStat.lastErr = "decode:" + (err && (err.message || err) || "unknown");
-        try { console.error("[downlink h264] decode() threw:", err && (err.message || err), err); } catch (e) {}
-        try { showOutputToast("H264 decode异常: " + (err && (err.message || err) || "unknown"), 6000); } catch (e) {}
-      }
-      return;
-    }
     receivedFrames += 1;
+    if (receivedFrames % 4 === 0) {
+      try { ws.send(JSON.stringify({ type: "ack", recv: receivedFrames })); } catch (err) {}
+    }
     receivedFramesWindow += 1;
     if (meta) {
       const latency = Date.now() - Number(meta.t_capture_ms || Date.now());
@@ -1877,6 +1927,10 @@ async function start() {
       chunkProfileLast = meta.profile || chunkProfileLast;
       updateMetrics();
     }
+    if (outCodecH264) {
+      feedOutputH264(event.data, meta);
+      return;
+    }
     enqueueOutputFrame(new Blob([event.data]), meta);
   };
   socket.onclose = () => {
@@ -1884,6 +1938,8 @@ async function start() {
     if (timer) clearInterval(timer);
     timer = null;
     stopVideoPull();
+    resetOutputDecoder();
+    resetUplinkEncoder();
     if (netPingTimer) clearInterval(netPingTimer);
     netPingTimer = null;
     if (outputPlaybackTimer) clearInterval(outputPlaybackTimer);
@@ -1891,8 +1947,6 @@ async function start() {
     outputPlaybackIntervalMs = null;
     clearOutputQueue();
     stopRecordDrain();
-    teardownUplinkEncoder();
-    teardownDownlinkDecoder();
     if (peWatchdog) { clearTimeout(peWatchdog); peWatchdog = null; }
     finalizeIsForResult = false;
     resultEpoch += 1;
@@ -1948,6 +2002,7 @@ async function send() {
     try { if (usingVideoFile) camera.pause(); } catch (err) {}
     clearResultVideo();
     clearOutputQueue();
+    showOutputStart(true, t("busy_resetting"));
     const ok = await beginSession();
     if (ok) return;
     startingRun = false;
@@ -1962,13 +2017,13 @@ sendBtn.onclick = () => { suppressPeThisSend = false; send(); };
 const PROMPT_GROUPS = [
   {
     key: "change_clothes",
-    label: "实时换装", label_en: "Change Outfit",
+    label: "实时换装", label_en: "Real-Time Outfit Change",
     cases: [
       { title: "白T恤", title_en: "White Tee", desc: "上衣换成白色圆领纯棉T恤", desc_en: "Top → white crew-neck cotton tee", text: "将主角的上衣换成白色圆领纯棉 T 恤。", text_en: "Replace the subject's top with a white crew-neck cotton T-shirt." },
       { title: "皮夹克", title_en: "Leather Jacket", desc: "外套换成哑光黑色皮质机车夹克", desc_en: "Jacket → matte black leather biker jacket", text: "将主角的外套换成哑光黑色皮质机车夹克。", text_en: "Replace the subject's jacket with a matte black leather biker jacket." },
       { title: "汉服", title_en: "Hanfu", desc: "换成传统汉服交领右衽上衣", desc_en: "Traditional cross-collar Hanfu top", text: "将主角的服装换成传统汉服交领右衽上衣。", text_en: "Replace the subject's outfit with a traditional cross-collar (right-lapel) Hanfu top." },
       { title: "学院风衬衫", title_en: "Preppy Shirt", desc: "白衬衫配藏青V领马甲加酒红领带", desc_en: "White shirt, navy V-vest, wine tie", text: "将主角的上衣换成白衬衫搭配藏青色 V 领马甲和酒红色领带。", text_en: "Replace the subject's top with a white shirt paired with a navy V-neck vest and a wine-red tie." },
-      { title: "京东定制帽 + 墨镜", title_en: "JD Cap + Shades", desc: "戴上“京东”的红色鸭舌帽和墨镜", desc_en: "Red cap reading “京东” plus sunglasses", text: "给主角戴上写着“京东”两个汉字的红色鸭舌帽和墨镜。", text_en: "Put a red cap printed with the Chinese characters \"京东\" and a pair of sunglasses on the subject." },
+      { title: "京东定制帽 + 墨镜", title_en: "Custom JD Cap + Shades", desc: "戴上“京东”的红色鸭舌帽和墨镜", desc_en: "Red cap reading “京东” plus sunglasses", text: "给主角戴上写着“京东”两个汉字的红色鸭舌帽和墨镜。", text_en: "Put a red cap printed with the Chinese characters \"京东\" and a pair of sunglasses on the subject." },
     ],
   },
   {
@@ -1979,6 +2034,7 @@ const PROMPT_GROUPS = [
       { title: "红色围巾", title_en: "Red Scarf", desc: "围上参考图里的红色流苏围巾", desc_en: "Red tasseled scarf from the reference image", ref: "scarf", text: "将参考图中的红色流苏围巾围到主角的颈部。", text_en: "Wrap the red tasseled scarf from the reference image around the subject's neck." },
       { title: "粉色T恤", title_en: "Pink Tee", desc: "换上参考图里的粉色短袖 T 恤", desc_en: "Pink short-sleeve tee from the reference image", ref: "pink_tee", text: "将主角的衣服换成参考图里的粉色短袖 T 恤。", text_en: "Replace the subject's clothing with the pink short-sleeve T-shirt from the reference image." },
       { title: "橙色眼镜", title_en: "Orange Glasses", desc: "戴上参考图里的橙色镜片眼镜", desc_en: "Orange-tinted glasses from the reference image", ref: "orange_glasses", text: "给主角戴上参考图里的橙色镜片眼镜。", text_en: "Put the orange-tinted glasses from the reference image on the subject." },
+      { title: "奶龙", title_en: "Nailong", desc: "主角换成参考图里的黄色玩偶", desc_en: "Subject → yellow toy from the reference image", ref: "nailong", text: "将视频中的主角替换为参考图中的黄色玩偶。", text_en: "Replace the main subject in the video with the yellow toy from the reference image." },
     ],
   },
   {
@@ -1987,7 +2043,7 @@ const PROMPT_GROUPS = [
     cases: [
       { title: "3D动画", title_en: "3D Animation", desc: "渲染为3D动画电影风格", desc_en: "Render as 3D animated-film style", text: "将整个画面渲染为3D动画电影风格。应用平滑的三维建模质感、柔和的全局光照和景深，以及皮克斯风格的角色与场景渲染。", text_en: "Render the entire scene in a 3D animated-film style. Apply smooth 3D-modeled surfaces, soft global illumination and depth of field, and Pixar-style character and scene rendering." },
       { title: "油画质感", title_en: "Oil Painting", desc: "转成梵高厚涂油画风格", desc_en: "Van Gogh impasto oil-painting style", text: "将整个画面转换为梵高的画的风格。应用厚重、富有表现力的笔触，鲜艳且强烈的色彩，天空中和风景中动态旋转的纹理，以及梵高画作中特有的粗放油彩（厚涂法）效果。", text_en: "Convert the entire scene into the style of a Van Gogh painting. Apply thick, expressive brushstrokes, vivid and intense colors, dynamic swirling textures in the sky and landscape, and the coarse impasto oil effect characteristic of Van Gogh's work." },
-      { title: "像素游戏", title_en: "Pixel Art", desc: "渲染为16色像素画风格", desc_en: "Render as 16-color pixel art", text: "将整个画面渲染为16色像素画风格。", text_en: "Render the entire scene in a 16-color pixel-art style." },
+      { title: "像素画", title_en: "Pixel Art", desc: "渲染为16色像素画风格", desc_en: "Render as 16-color pixel art", text: "将整个画面渲染为16色像素画风格。", text_en: "Render the entire scene in a 16-color pixel-art style." },
       { title: "日漫赛璐璐", title_en: "Anime Cel", desc: "转成日式动漫赛璐璐风格", desc_en: "Japanese anime cel-shaded style", text: "将整个画面转换为日式动漫赛璐璐风格：干净的黑色描边、大面积平涂的纯色色块、明确的明暗二分硬边阴影和简洁的高光。", text_en: "Convert the entire scene into a Japanese anime cel-shaded style: clean black outlines, large flat areas of solid color, clear hard-edged two-tone shading, and simple highlights." },
     ],
   },
@@ -1995,10 +2051,10 @@ const PROMPT_GROUPS = [
     key: "face_edit",
     label: "外貌改造", label_en: "Look Edit",
     cases: [
-      { title: "戴上墨镜", title_en: "Sunglasses", desc: "戴一副粉色飞行员墨镜", desc_en: "Add pink aviator sunglasses", text: "给主角添加一副粉色飞行员墨镜架在鼻梁上。", text_en: "Add a pair of pink aviator sunglasses resting on the subject's nose." },
+      { title: "戴上墨镜", title_en: "Sunglasses", desc: "戴一副粉色飞行员墨镜", desc_en: "Add pink aviator sunglasses", text: "给主角添加一副粉色飞行员墨镜架在鼻梁上。", text_en: "Add a pair of pink aviator sunglasses resting on the bridge of the subject's nose." },
       { title: "戴口罩", title_en: "Face Mask", desc: "脸上戴一个医用口罩", desc_en: "Add a medical face mask", text: "给主角的脸上戴一个医用口罩。", text_en: "Put a medical face mask on the subject's face." },
       { title: "加耳环", title_en: "Earrings", desc: "双耳加一对金色圆环耳环", desc_en: "Add a pair of gold hoop earrings", text: "给主角的双耳耳垂添加一对抛光金色圆环耳环。", text_en: "Add a pair of polished gold hoop earrings to the subject's earlobes." },
-      { title: "加络腮胡", title_en: "Beard", desc: "下颌脸颊加浓密络腮胡", desc_en: "Add a thick full beard", text: "给主角的下颌和脸颊添加浓密的深黄色络腮胡须，自然卷曲，覆盖下巴和两颊。", text_en: "Add a thick dark-blond full beard to the subject's jaw and cheeks, naturally curly, covering the chin and both cheeks." },
+      { title: "加络腮胡", title_en: "Beard", desc: "下颌脸颊加浓密络腮胡", desc_en: "Add a thick full beard", text: "给主角的下颌和脸颊添加浓密的深黄色络腮胡须，自然卷曲，覆盖下巴和两颊。", text_en: "Add a thick dark-yellow full beard to the subject's jaw and cheeks, naturally curly, covering the chin and both cheeks." },
     ],
   },
   {
@@ -2007,9 +2063,8 @@ const PROMPT_GROUPS = [
     cases: [
       { title: "大理石雕塑", title_en: "Marble Statue", desc: "变成白色大理石雕塑", desc_en: "Turn into a white marble statue", text: "将主角整体转化为白色大理石雕塑：可见石材纹理和细微灰色脉络、表面呈抛光光泽、光线在曲面形成柔和高光，眼睛和头发同为石质，保持原有动作但带有雕塑般的质感。", text_en: "Transform the subject entirely into a white marble statue: visible stone texture and fine gray veining, a polished glossy surface, soft highlights on the curved surfaces, eyes and hair also made of stone, keeping the original motion but with a sculptural quality." },
       { title: "乐高小人", title_en: "LEGO Figure", desc: "变成乐高积木小人", desc_en: "Turn into a LEGO minifigure", text: "将主角转化为乐高积木小人风格：黄色圆柱形头部、表面为塑料亚光质感，五官简化为印刷贴纸式的黑色圆点眼睛和弧线微笑。", text_en: "Transform the subject into a LEGO minifigure style: a yellow cylindrical head with a matte plastic surface, facial features simplified into printed-sticker-style black dot eyes and a curved smile." },
-      { title: "赛博机械体", title_en: "Cyborg", desc: "变成半机械生化体", desc_en: "Turn into a cyborg", text: "将主角转化为机械生化体：面部露出银色金属骨架和精密齿轮、眼睛发出冷蓝光、皮肤接缝处可见荧光线路板纹路，关节处有可见的液压结构。", text_en: "Transform the subject into a cyborg: a silver metal skeleton and precision gears exposed on the face, eyes glowing cold blue, glowing circuit-board traces along the skin seams, and visible hydraulic structures at the joints." },
+      { title: "赛博机械体", title_en: "Cyborg", desc: "变成赛博机械体", desc_en: "Turn into a cyborg", text: "将主角转化为赛博机械体：面部露出银色金属骨架和精密齿轮、眼睛发出冷蓝光、皮肤接缝处可见荧光线路板纹路，关节处有可见的液压结构。", text_en: "Transform the subject into a cyborg: a silver metal skeleton and precision gears exposed on the face, eyes glowing cold blue, glowing circuit-board traces along the skin seams, and visible hydraulic structures at the joints." },
       { title: "黏土动画", title_en: "Claymation", desc: "变成定格黏土动画角色", desc_en: "Turn into a stop-motion clay character", text: "将主角转化为定格黏土动画角色：表面可见手工捏制的指纹压痕和不规则质感、色彩饱和但略带哑光、比例微微卡通化（头部略大）。", text_en: "Transform the subject into a stop-motion claymation character: visible hand-molded fingerprint dents and irregular texture, saturated but slightly matte colors, and mildly cartoonish proportions (a slightly larger head)." },
-      { title: "机器人", title_en: "Robot", desc: "变成机器人", desc_en: "Turn into a robot", text: "将主角变成一个机器人。", text_en: "Turn the subject into a robot." },
     ],
   },
   {
@@ -2023,12 +2078,12 @@ const PROMPT_GROUPS = [
   },
   {
     key: "swap_hero",
-    label: "主角变身", label_en: "Swap Identity",
+    label: "主角变身", label_en: "Transform Subject",
     cases: [
       { title: "梅西", title_en: "Messi", desc: "主角变成球星梅西", desc_en: "Turn the subject into Lionel Messi", text: "将主角变成足球明星梅西（Lionel Messi）的样貌。", text_en: "Change the subject's appearance into that of the football star Lionel Messi." },
       { title: "詹姆斯", title_en: "LeBron", desc: "主角变成球星詹姆斯", desc_en: "Turn the subject into LeBron James", text: "将主角变成篮球明星勒布朗·詹姆斯（LeBron James）的样貌。", text_en: "Change the subject's appearance into that of the basketball star LeBron James." },
       { title: "特朗普", title_en: "Trump", desc: "主角变成特朗普", desc_en: "Turn the subject into Donald Trump", text: "将主角变成美国总统特朗普（Donald Trump）的样貌。", text_en: "Change the subject's appearance into that of U.S. President Donald Trump." },
-      { title: "奥巴马", title_en: "Obama", desc: "主角变成奥巴马", desc_en: "Turn the subject into Barack Obama", text: "将主角变成美国总统奥巴马（Barack Obama）的样貌。", text_en: "Change the subject's appearance into that of U.S. President Barack Obama." },
+      { title: "奥巴马", title_en: "Obama", desc: "主角变成奥巴马", desc_en: "Turn the subject into Barack Obama", text: "将主角变成美国前总统奥巴马（Barack Obama）的样貌。", text_en: "Change the subject's appearance into that of former U.S. President Barack Obama." },
       { title: "奥特曼", title_en: "Ultraman", desc: "主角变成奥特曼", desc_en: "Turn the subject into Ultraman", text: "将主角的脸和身体变成奥特曼。", text_en: "Change the subject's face and body into Ultraman." },
       { title: "拉布拉多", title_en: "Labrador", desc: "主角变成拉布拉多", desc_en: "Turn the subject into a Labrador", text: "将主角的脸和身体变成一只拉布拉多犬。", text_en: "Change the subject's face and body into a Labrador dog." },
     ],
@@ -2077,13 +2132,14 @@ function refImageActive() {
 
 function syncPeAvailability() {
   const usePeEl = document.getElementById("usePe");
-  const locked = refImageActive();
-  if (usePeEl) usePeEl.disabled = locked;
+  const peAvailable = !(SERVER_DEFAULTS && SERVER_DEFAULTS.pe_available === false);
+  const locked = refImageActive() || !peAvailable;
+  if (usePeEl) {
+    usePeEl.disabled = locked;
+    if (!peAvailable) usePeEl.checked = false;
+  }
   if (peToggleEl) {
     peToggleEl.setAttribute("aria-disabled", locked ? "true" : "false");
-    peToggleEl.title = locked
-      ? t("pe_locked_rv2v")
-      : t("pe_hint");
   }
 }
 
@@ -2109,7 +2165,6 @@ function openCategory(group, chipEl) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "prompt-case";
-    btn.title = sceneField(item, "text");
     if (item.ref) btn.classList.add("has-ref");
     const tEl = document.createElement("span");
     tEl.className = "pc-title";
@@ -2196,38 +2251,17 @@ function handleVideoEnded() {
   if (netPingTimer) { clearInterval(netPingTimer); netPingTimer = null; }
   updateMetrics();
   if (ws && ws.readyState === WebSocket.OPEN && sessionGranted) {
+    finalizeIsForResult = true;
     updateUploadProgress();
-    let waited = 0;
-    let lastOut = backendOutFrames;
-    let stalled = 0;
-    const finalizeNow = () => {
-      finalizeIsForResult = true;
-      showOutputToast(t("toast_finalizing"), 4000);
-      setSendBusy(true, t("toast_finalizing"));
-      if (finalizeWatchdog) clearTimeout(finalizeWatchdog);
-      finalizeWatchdog = setTimeout(() => {
-        finalizeWatchdog = null;
-        if (!finalizeIsForResult) return;
-        finalizeIsForResult = false;
-        fetchAndShowResult();
-      }, 12000);
-      try { ws.send(JSON.stringify({ type: "finalize_recording" })); }
-      catch (err) {}
-    };
-    stopRecordDrain();
-    recordDrainTimer = setInterval(() => {
-      waited += 200;
-      const target = sentFrames;
-      const done = target > 0 && backendOutFrames >= target;
-      if (backendOutFrames > lastOut) { lastOut = backendOutFrames; stalled = 0; }
-      else { stalled += 200; }
-      updateUploadProgress();
-      if (done || stalled >= 6000 || waited >= 60000) {
-        clearInterval(recordDrainTimer); recordDrainTimer = null;
-        finalizeNow();
-      }
-    }, 200);
-  } else {
+    if (finalizeWatchdog) clearTimeout(finalizeWatchdog);
+    finalizeWatchdog = setTimeout(() => {
+      finalizeWatchdog = null;
+      if (!finalizeIsForResult) return;
+      finalizeIsForResult = false;
+      fetchAndShowResult();
+    }, 30000);
+    try { ws.send(JSON.stringify({ type: "finalize_recording" })); }
+    catch (err) {}
   }
 }
 
@@ -2288,7 +2322,7 @@ function updateUploadProgress() {
   if (outputWaitIco) outputWaitIco.textContent = "✨";
   let label = t("edit_processing");
   if (sentFrames > 0) {
-    const pct = Math.max(0, Math.min(99, Math.round(backendOutFrames / sentFrames * 100)));
+    const pct = Math.max(0, Math.min(100, Math.round(backendOutFrames / sentFrames * 100)));
     label = label + " " + pct + "%";
   }
   if (outputWaitHint) outputWaitHint.textContent = label;
@@ -2424,6 +2458,10 @@ function onRecordingFinalized(msg) {
     return;
   }
   finalizeIsForResult = false;
+  if (outputWaitOverlay) outputWaitOverlay.style.display = "";
+  if (outputWaitIco) outputWaitIco.textContent = "✨";
+  if (outputWaitHint) outputWaitHint.textContent = t("toast_finalizing");
+  setSendBusy(true, t("toast_finalizing"));
   fetchAndShowResult();
 }
 if (downloadBubble) {
@@ -2492,31 +2530,7 @@ for (const id of ["width", "height", "cameraFps", "fps", "quality", "steps", "us
   document.getElementById(id).addEventListener("input", updateMetrics);
   document.getElementById(id).addEventListener("change", updateMetrics);
 }
-function mirrorToggle(uiId, legacyId, opts = {}) {
-  const ui = document.getElementById(uiId), legacy = document.getElementById(legacyId);
-  const numUi = opts.numUiId ? document.getElementById(opts.numUiId) : null;
-  const numLegacy = opts.numLegacyId ? document.getElementById(opts.numLegacyId) : null;
-  const sync = () => {
-    if (!ui || !legacy) return;
-    ui.checked = legacy.checked;
-    if (numUi && numLegacy) numUi.value = numLegacy.value;
-    if (numUi) numUi.disabled = !legacy.checked;
-    if (opts.syncExtra) opts.syncExtra();
-  };
-  if (ui) ui.addEventListener("change", () => {
-    if (legacy && (!opts.guardEnabled || !legacy.disabled)) legacy.checked = ui.checked;
-    if (numUi) numUi.disabled = !ui.checked;
-    if (opts.onToggle) opts.onToggle(ui.checked);
-    updateMetrics();
-  });
-  if (numUi) numUi.addEventListener("input", () => {
-    if (numLegacy) numLegacy.value = numUi.value;
-    updateMetrics();
-  });
-  sync();
-  return sync;
-}
-const upqTierEl = document.getElementById("upqTier");
+var upqTierEl = document.getElementById("upqTier");
 const qualityLegacyEl = document.getElementById("quality");
 function highlightUpqTier(v) {
   if (!upqTierEl) return;
@@ -2525,7 +2539,7 @@ function highlightUpqTier(v) {
   }
 }
 function syncUpQualityUi() {
-  if (qualityLegacyEl) highlightUpqTier(qualityLegacyEl.value);
+  highlightUpqTier(qualityLegacyEl ? qualityLegacyEl.value : "0.6");
 }
 if (upqTierEl) {
   for (const b of upqTierEl.querySelectorAll("button")) {
@@ -2533,14 +2547,15 @@ if (upqTierEl) {
       const v = b.getAttribute("data-upq");
       if (qualityLegacyEl) qualityLegacyEl.value = v;
       highlightUpqTier(v);
+      resetUplinkEncoder();
       updateMetrics();
     });
   }
 }
-const Q_TIERS = [20, 60, 90];
+const Q_TIERS = [20, 40, 60];
 const downQualityUi = document.getElementById("downQualityUi");
 const qtierEl = document.getElementById("qtier");
-let autoQTier = 1;
+let autoQTier = 2;
 let autoQLowStreak = 0;
 let autoQHoldTicks = 0;
 function sendOutputQuality(v) {
@@ -2572,7 +2587,7 @@ if (qtierEl) {
     b.addEventListener("click", () => {
       const d = b.getAttribute("data-q");
       if (d === "auto") {
-        autoQuality = true; autoQTier = 1; autoQLowStreak = 0; autoQHoldTicks = 0;
+        autoQuality = true; autoQTier = 2; autoQLowStreak = 0; autoQHoldTicks = 0;
         highlightQTier("auto");
         setDownQuality(Q_TIERS[autoQTier], { live: true });
       } else {
@@ -2592,7 +2607,6 @@ if (fpsTierEl) {
       if (fpsInputEl) fpsInputEl.value = v;
       for (const x of fpsTierEl.querySelectorAll("button")) x.classList.toggle("on", x === b);
       if (timer) { clearInterval(timer); timer = setInterval(tick, Math.floor(1000 / sendTargetFps())); }
-      if (videoPullActive) { videoPullFps = sendTargetFps(); }
       updateMetrics();
     });
   }
@@ -2600,16 +2614,16 @@ if (fpsTierEl) {
 function autoQualityTick() {
   if (!autoQuality) return;
   if (!(ws && ws.readyState === WebSocket.OPEN && sessionGranted)) return;
-  const rtt = netRttLastMs;
+  const rtt = (downDelayMs !== null && downDelayMs !== undefined) ? downDelayMs : netRttLastMs;
   if (rtt === null || rtt === undefined) return;
   if (autoQHoldTicks > 0) autoQHoldTicks--;
   let target = autoQTier;
-  if (rtt > 333) {
-    if (autoQHoldTicks === 0) target = Math.max(0, autoQTier - 1);
+  if (rtt > 300) {
+    if (autoQHoldTicks === 0) target = Math.max(1, autoQTier - 1);
     autoQLowStreak = 0;
   } else if (rtt < 150) {
     autoQLowStreak++;
-    if (autoQLowStreak >= 5 && autoQHoldTicks === 0) { target = Math.min(1, autoQTier + 1); autoQLowStreak = 0; }
+    if (autoQLowStreak >= 5 && autoQHoldTicks === 0) { target = Math.min(2, autoQTier + 1); autoQLowStreak = 0; }
   } else {
     autoQLowStreak = 0;
   }
@@ -2628,17 +2642,24 @@ function applyServerDefaults() {
   const d = SERVER_DEFAULTS || {};
   const numMap = {
     width: "width", height: "height", steps: "num_inference_steps",
+    fps: "fps",
     kvResetFrames: "kv_reset_frames", staticDiffThresh: "static_diff_thresh",
-    downQualityUi: "output_quality",
   };
   for (const [id, key] of Object.entries(numMap)) {
     const v = d[key];
     if (v !== null && v !== undefined) document.getElementById(id).value = v;
   }
+  if (d.fps !== null && d.fps !== undefined) {
+    const tier = document.getElementById("fpsTier");
+    if (tier) for (const b of tier.querySelectorAll("button")) {
+      b.classList.toggle("on", Number(b.getAttribute("data-fps")) === Number(d.fps));
+    }
+  }
   const boolMap = {
     freezeKvOnStatic: "freeze_kv_on_static",
     usePe: "use_pe",
     dbgGateEnabled: "online_gate",
+    profileTimings: "profile_timings",
   };
   for (const [id, key] of Object.entries(boolMap)) {
     const v = d[key];
@@ -2649,13 +2670,25 @@ function applyServerDefaults() {
     document.getElementById("useMaxTemporalIds").checked = true;
     document.getElementById("maxTemporalIds").value = maxIds;
   }
+  if (d.output_quality !== undefined && d.output_quality !== "auto") {
+    autoQuality = false;
+    highlightQTier(Number(d.output_quality));
+    setDownQuality(Number(d.output_quality), { live: false });
+  } else {
+    highlightQTier("auto");
+    setDownQuality(Q_TIERS[autoQTier], { live: false });
+  }
   if (typeof syncUpQualityUi === "function") syncUpQualityUi();
 }
 
 window.addEventListener("load", () => {
   applyServerDefaults();
   const langBtn = document.getElementById("langToggle");
-  if (langBtn) langBtn.addEventListener("click", toggleLang);
+  if (langBtn) {
+    for (const b of langBtn.querySelectorAll("button")) {
+      b.addEventListener("click", () => setLang(b.getAttribute("data-lang")));
+    }
+  }
   applyLang();
   applyOrientation(defaultCameraOrientation());
   updateMaxTemporalIdsVisibility();

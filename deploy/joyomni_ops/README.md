@@ -34,13 +34,13 @@ JOYOMNI_OPS_NO_FP8=1 pip install .
 
 Chosen automatically from the local nvcc:
 - always: `sm_80`, `sm_89`, `sm_90`
-- CUDA ≥ 12.8: also `sm_100a` (B200) and `sm_120a` (RTX 5090)
+- CUDA ≥ 12.8: also `sm_100a` (B200) and `sm_120a` (RTX PRO 6000 / RTX 5090)
 - on CUDA < 12.8 an `sm_90` PTX is embedded so the driver JITs for Blackwell
   (correctness only; build on CUDA ≥ 12.8 for tuned Blackwell SASS)
 
 Override with `JOYOMNI_OPS_CUDA_ARCHS="90;100a;120a"`.
 
-cutlass tag matching the reference build: `57e3cfb47a2d9e0d46eb6335c3dc411498efa198`.
+cutlass commit matching the reference build: `dcf215af`.
 
 ## Usage
 

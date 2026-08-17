@@ -7,10 +7,6 @@ __pycache__/
 *.egg-info/
 .ipynb_checkpoints/
 
-# joyomni_ops native build artifacts (built from source; never commit binaries)
-joyomni_ops/build/
-*.so
-
 # OS / editor
 .DS_Store
 
@@ -18,7 +14,20 @@ joyomni_ops/build/
 deploy/recordings/
 deploy/server.log
 
-# Local secrets / machine-specific launch settings
-.env
-.env.*
-!.env.example
+# Machine-local config and notes (never commit; may contain secrets)
+deploy/.env.local
+deploy.local.md
+
+# joyomni_ops build artifacts (compiled locally via pip install)
+deploy/joyomni_ops/build/
+deploy/joyomni_ops/**/*.so
+deploy/*.egg-info/
+deploy/joyomni_ops/*.egg-info/
+
+# Third-party build checkouts (SageAttention, cutlass — cloned locally, not vendored)
+deploy/tmp/
+/cutlass/
+
+# Hugging Face Space staging + ZeroGPU engine (not part of the public release)
+deploy/hf_space/
+deploy/xvideo/serving/zerogpu_engine.py

@@ -1,8 +1,12 @@
+import math
 import random
 
 import numpy as np
 from PIL import Image
 import torch
+import torchvision.transforms.functional as TF
+
+from xvideo.config import BASE_BUCKET_SIZE, generate_video_image_bucket
 
 
 def seed_everything(seed: int | None = None) -> None:
@@ -65,28 +69,21 @@ class _BucketGroup:
 def _dynamic_resize_from_bucket(
     image: Image.Image | torch.Tensor,
     bucket_configs: list[tuple[int, int, int, int, int]] | None = None,
-    img_basesize: int | None = 512,
+    img_basesize: int | None = BASE_BUCKET_SIZE * 2,
     num_frames: int = 1,
     num_items: int = 1,
     prioritize_frame_matching: bool = True,
     return_bucket: bool = False,
-    multiple_vides: bool = False,
+    multiple_videos: bool = False,
     vid_basesizes: list[tuple[int, int]] | None = None,
     img_basesizes: list[tuple[int, int]] | None = None,
 ):
-    from typing import Tuple
-    import math
-    import torchvision.transforms.functional as TF
-
-    def resize_center_crop(img: Image.Image | torch.Tensor, target_size: Tuple[int, int]) -> Image.Image | torch.Tensor:
-        if isinstance(img, Image.Image):
-            w, h = img.size
-        elif torch.is_tensor(img):
-            if img.dim() < 3:
-                raise ValueError(f"Expected image/video tensor with at least 3 dims, but got {img.dim()}.")
-            h, w = img.shape[-2:]
-        else:
-            raise TypeError(f"Unsupported media type for resizing: {type(img)}")
+    def resize_center_crop(
+        img: Image.Image | torch.Tensor,
+        target_size: tuple[int, int],
+        src_hw: tuple[int, int],
+    ) -> Image.Image | torch.Tensor:
+        h, w = src_hw
         bh, bw = target_size
         scale = max(bh / h, bw / w)
         resize_h, resize_w = math.ceil(h * scale), math.ceil(w * scale)
@@ -106,7 +103,7 @@ def _dynamic_resize_from_bucket(
         img_h, img_w = image.shape[-2:]
         if num_frames <= 1:
             num_frames = int(image.shape[0])
-        if multiple_vides:
+        if multiple_videos:
             num_items = 2
     else:
         raise TypeError(f"Unsupported media type for bucket resize: {type(image)}")
@@ -114,8 +111,6 @@ def _dynamic_resize_from_bucket(
     if bucket_configs is None:
         if img_basesize is None and vid_basesizes is None:
             raise ValueError("Either `bucket_configs` or `img_basesize` or `vid_basesizes` must be provided.")
-
-        from xvideo.config import generate_video_image_bucket
 
         is_video = num_frames > 1
         is_multiple_items = num_items > 1
@@ -139,7 +134,7 @@ def _dynamic_resize_from_bucket(
     )
     bucket = bucket_group.find_best_bucket((num_items, num_frames, img_h, img_w))
     target_height, target_width = bucket[-2], bucket[-1]
-    img_proc = resize_center_crop(image, (target_height, target_width))
+    img_proc = resize_center_crop(image, (target_height, target_width), (img_h, img_w))
     if return_bucket:
         return img_proc, bucket
     return img_proc

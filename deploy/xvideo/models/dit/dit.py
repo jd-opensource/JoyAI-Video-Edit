@@ -2,7 +2,6 @@ from contextlib import contextmanager
 import logging
 import os
 from typing import Callable, Dict, Iterable, List, Tuple, Optional
-from einops import rearrange
 import math
 
 import torch
@@ -18,7 +17,15 @@ from diffusers.models.attention import FeedForward
 from diffusers.models.embeddings import PixArtAlphaTextProjection, TimestepEmbedding, Timesteps
 
 
-from flash_attn.cute import flash_attn_func as _fa4_func
+try:
+    from flash_attn.cute import flash_attn_func as _fa4_func
+    _FA4_IMPORTED = True
+except Exception:  # noqa: BLE001
+    # flash-attn-4 is optional. On GPUs/toolchains where it isn't available
+    # (e.g. no FA4 build for this arch), fall back to SDPA (cuDNN/flash) at
+    # runtime instead of failing at import time.
+    _fa4_func = None
+    _FA4_IMPORTED = False
 
 
 SOURCE_ID_TARGET = 0.0
@@ -39,6 +46,7 @@ def _env_on(name: str) -> bool:
 
 _FP8_IMG_ENABLED = _env_on("JOYOMNI_FP8_IMG")
 _FP8_TXT_ENABLED = _env_on("JOYOMNI_FP8_TXT")
+_TXT_PARALLEL_ENABLED = _env_on("JOYOMNI_TXT_PARALLEL")
 
 
 def _fp8_stream_wanted(stream: str) -> bool:
@@ -120,19 +128,32 @@ def _clone_kv_tensor(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
     return tensor.detach().clone()
 
 
-_FA4_DISABLED = False
+_FA4_DISABLED = not _FA4_IMPORTED
 
-# SM120 (Blackwell): cuDNN attention is ~10-20% faster than PyTorch's flash backend
-# here, so order it first. flash/efficient are fallbacks. (Benchmarked H=32 D=128 bf16.)
 _SDPA_BACKENDS = [SDPBackend.CUDNN_ATTENTION, SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]
+
+_SAGE_ATTN_ENABLED = _env_on("JOYOMNI_SAGE_ATTN")
+_SAGE_MIN_KV_LEN = 4096
+_sage_attn_func = None
+if _SAGE_ATTN_ENABLED:
+    try:
+        from sageattention import sageattn as _sage_attn_func
+    except Exception as _sage_exc:  # noqa: BLE001
+        _sage_attn_func = None
+        print(f"[dit] JOYOMNI_SAGE_ATTN=1 but sageattention unavailable: {_sage_exc!r}")
 
 
 def _sdpa_attention(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
-    # q/k/v come in as [B, S, H, D]; SDPA expects [B, H, S, D].
+    if (
+        _sage_attn_func is not None
+        and key.shape[1] >= _SAGE_MIN_KV_LEN
+        and query.shape[-1] <= 128
+    ):
+        return _sage_attn_func(query, key, value, tensor_layout="NHD", is_causal=False)
     q = query.transpose(1, 2)
     k = key.transpose(1, 2)
     v = value.transpose(1, 2)
-    with sdpa_kernel(_SDPA_BACKENDS):
+    with sdpa_kernel(_SDPA_BACKENDS, set_priority=True):
         out = F.scaled_dot_product_attention(q, k, v, is_causal=False)
     return out.transpose(1, 2)
 
@@ -151,9 +172,6 @@ def _flash_attention4(query: torch.Tensor, key: torch.Tensor, value: torch.Tenso
                 out = out[0]
             return out.to(original_dtype)
         except Exception as exc:  # noqa: BLE001
-            # FA4 4.0.0b13 fails to bind its CuTe kernel against some
-            # nvidia-cutlass-dsl versions (see issue #4). Probe once, then fall
-            # back to SDPA (still a fused flash/cuDNN kernel on sm100/sm120).
             _FA4_DISABLED = True
             logger.warning(f"[{__name__}] FA4 unavailable, falling back to SDPA (flash/cuDNN): {exc!r}")
     return _sdpa_attention(query, key, value).to(original_dtype)
@@ -174,9 +192,15 @@ def warmup_attention_backend(
         k = torch.zeros(1, kv_len, heads_num, head_dim, device=device, dtype=dtype)
         _flash_attention4(q, k, k)
         torch.cuda.synchronize(device)
-        logger.warning(f"[{__name__}] FA4 warmup done (q={q_len}, kv={kv_len}, heads={heads_num}, dim={head_dim})")
+        if not _FA4_DISABLED:
+            backend = "FA4"
+        elif _sage_attn_func is not None and kv_len >= _SAGE_MIN_KV_LEN:
+            backend = "sage"
+        else:
+            backend = "cuDNN"
+        logger.warning(f"[{__name__}] attention warmup done via {backend} (q={q_len}, kv={kv_len}, heads={heads_num}, dim={head_dim})")
     except Exception as exc:  # noqa: BLE001
-        logger.warning(f"[{__name__}] FA4 warmup failed (will lazily compile in-loop): {exc}")
+        logger.warning(f"[{__name__}] attention warmup failed (will lazily compile in-loop): {exc}")
 
 
 def _concat_kv_entries(
@@ -317,6 +341,7 @@ class MMDoubleStreamBlock(nn.Module):
         skip_text_stream: bool = False,
         kv_cache_pre_rope: bool = False,
         cached_freqs_cis: Optional[tuple] = None,
+        txt_side_stream: Optional[torch.cuda.Stream] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         _maybe_install_fp8_stream(self, "img")
         _fp8_on = _fp8_stream_enabled(self, "img")
@@ -341,6 +366,26 @@ class MMDoubleStreamBlock(nn.Module):
                 txt_mod2_gate,
             ) = self.txt_mod(vec)
 
+        _txt_par = txt_side_stream is not None and not skip_text_stream
+        if _txt_par:
+            _fork_ev = torch.cuda.Event()
+            _fork_ev.record()
+            with torch.cuda.stream(txt_side_stream):
+                txt_side_stream.wait_event(_fork_ev)
+                txt_modulated = _sgl_fused.fused_layernorm_modulate(
+                    txt, shift=txt_mod1_shift, scale=txt_mod1_scale,
+                    weight=self.txt_norm1.weight if self.txt_norm1.elementwise_affine else None,
+                    bias=self.txt_norm1.bias if self.txt_norm1.elementwise_affine else None,
+                    eps=self.txt_norm1.eps,
+                )
+                txt_qkv = self._fp8_txt_attn_qkv(txt_modulated) if _fp8_txt_on else self.txt_attn_qkv(txt_modulated)
+                _tv = txt_qkv.view(txt_qkv.shape[0], txt_qkv.shape[1], 3, self.heads_num, -1)
+                txt_q, txt_k, txt_v = _tv[:, :, 0], _tv[:, :, 1], _tv[:, :, 2]
+                txt_q = self.txt_attn_q_norm(txt_q).to(txt_v.dtype)
+                txt_k = self.txt_attn_k_norm(txt_k).to(txt_v.dtype)
+                _txt_qkv_ev = torch.cuda.Event()
+                _txt_qkv_ev.record(txt_side_stream)
+
         img_modulated = _sgl_fused.fused_layernorm_modulate(
             img, shift=img_mod1_shift, scale=img_mod1_scale,
             weight=self.img_norm1.weight if self.img_norm1.elementwise_affine else None,
@@ -348,9 +393,8 @@ class MMDoubleStreamBlock(nn.Module):
             eps=self.img_norm1.eps,
         )
         img_qkv = self._fp8_img_attn_qkv(img_modulated) if _fp8_on else self.img_attn_qkv(img_modulated)
-        img_q, img_k, img_v = rearrange(
-            img_qkv, "B L (K H D) -> K B L H D", K=3, H=self.heads_num
-        )
+        _iv = img_qkv.view(img_qkv.shape[0], img_qkv.shape[1], 3, self.heads_num, -1)
+        img_q, img_k, img_v = _iv[:, :, 0], _iv[:, :, 1], _iv[:, :, 2]
         if kv_cache_pre_rope:
             img_k_for_cache = _sgl_fused.rmsnorm_qk_bf16(
                 img_k, self.img_attn_k_norm.weight, eps=self.img_attn_k_norm.eps
@@ -365,7 +409,11 @@ class MMDoubleStreamBlock(nn.Module):
         if not kv_cache_pre_rope:
             img_k_for_cache = img_k
 
-        if not skip_text_stream:
+        if _txt_par:
+            torch.cuda.current_stream().wait_event(_txt_qkv_ev)
+            for _t in (txt_q, txt_k, txt_v):
+                _t.record_stream(torch.cuda.current_stream())
+        elif not skip_text_stream:
             txt_modulated = _sgl_fused.fused_layernorm_modulate(
                 txt, shift=txt_mod1_shift, scale=txt_mod1_scale,
                 weight=self.txt_norm1.weight if self.txt_norm1.elementwise_affine else None,
@@ -373,11 +421,10 @@ class MMDoubleStreamBlock(nn.Module):
                 eps=self.txt_norm1.eps,
             )
             txt_qkv = self._fp8_txt_attn_qkv(txt_modulated) if _fp8_txt_on else self.txt_attn_qkv(txt_modulated)
-            txt_q, txt_k, txt_v = rearrange(
-                txt_qkv, "B L (K H D) -> K B L H D", K=3, H=self.heads_num
-            )
-            txt_q = self.txt_attn_q_norm(txt_q).to(txt_v)
-            txt_k = self.txt_attn_k_norm(txt_k).to(txt_v)
+            _tv = txt_qkv.view(txt_qkv.shape[0], txt_qkv.shape[1], 3, self.heads_num, -1)
+            txt_q, txt_k, txt_v = _tv[:, :, 0], _tv[:, :, 1], _tv[:, :, 2]
+            txt_q = self.txt_attn_q_norm(txt_q).to(txt_v.dtype)
+            txt_k = self.txt_attn_k_norm(txt_k).to(txt_v.dtype)
 
         if skip_text_stream:
             q = img_q
@@ -439,6 +486,31 @@ class MMDoubleStreamBlock(nn.Module):
                 return self._fp8_txt_mlp_down(h)
             return self.txt_mlp(x)
 
+        def _txt_tail(txt_in):
+            t = _sgl_fused.fused_add_gate(
+                txt_in, _txt_proj_call(txt_attn),
+                txt_mod1_gate,
+            )
+            t_mod2 = _sgl_fused.fused_layernorm_modulate(
+                t, shift=txt_mod2_shift, scale=txt_mod2_scale,
+                weight=self.txt_norm2.weight if self.txt_norm2.elementwise_affine else None,
+                bias=self.txt_norm2.bias if self.txt_norm2.elementwise_affine else None,
+                eps=self.txt_norm2.eps,
+            )
+            return _sgl_fused.fused_add_gate(
+                t, _txt_mlp_call(t_mod2),
+                txt_mod2_gate,
+            )
+
+        if _txt_par:
+            _attn_ev = torch.cuda.Event()
+            _attn_ev.record()
+            with torch.cuda.stream(txt_side_stream):
+                txt_side_stream.wait_event(_attn_ev)
+                txt_out = _txt_tail(txt)
+                _txt_done_ev = torch.cuda.Event()
+                _txt_done_ev.record(txt_side_stream)
+
         img = _sgl_fused.fused_add_gate(
             img, _img_proj_call(img_attn),
             img_mod1_gate,
@@ -454,21 +526,12 @@ class MMDoubleStreamBlock(nn.Module):
             img_mod2_gate,
         )
 
-        if not skip_text_stream:
-            txt = _sgl_fused.fused_add_gate(
-                txt, _txt_proj_call(txt_attn),
-                txt_mod1_gate,
-            )
-            txt_mod2_modulated = _sgl_fused.fused_layernorm_modulate(
-                txt, shift=txt_mod2_shift, scale=txt_mod2_scale,
-                weight=self.txt_norm2.weight if self.txt_norm2.elementwise_affine else None,
-                bias=self.txt_norm2.bias if self.txt_norm2.elementwise_affine else None,
-                eps=self.txt_norm2.eps,
-            )
-            txt = _sgl_fused.fused_add_gate(
-                txt, _txt_mlp_call(txt_mod2_modulated),
-                txt_mod2_gate,
-            )
+        if _txt_par:
+            torch.cuda.current_stream().wait_event(_txt_done_ev)
+            txt_out.record_stream(torch.cuda.current_stream())
+            txt = txt_out
+        elif not skip_text_stream:
+            txt = _txt_tail(txt)
 
         return img, txt
 
@@ -480,11 +543,8 @@ class WanTimeTextImageEmbedding(nn.Module):
         time_freq_dim: int,
         time_proj_dim: int,
         text_embed_dim: int,
-        image_embed_dim: Optional[int] = None,
-        pos_embed_seq_len: Optional[int] = None,
     ):
         super().__init__()
-        _ = image_embed_dim, pos_embed_seq_len
 
         self.timesteps_proj = Timesteps(
             num_channels=time_freq_dim, flip_sin_to_cos=True, downscale_freq_shift=0)
@@ -835,7 +895,6 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         hidden_states: torch.Tensor,
         timestep: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
-        encoder_hidden_states_mask: torch.Tensor = None,
         ref_video_latent: Optional[torch.Tensor] = None,
         current_temporal_ids: Optional[torch.Tensor] = None,
         cached_temporal_ids: Optional[torch.Tensor] = None,
@@ -862,11 +921,6 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         current_patch_shape = self._get_patch_shape(hidden_states, patch_size)
         current_seq_len = math.prod(current_patch_shape)
         device = hidden_states.device
-
-        encoder_hidden_states_mask = encoder_hidden_states_mask.to(
-            device=encoder_hidden_states.device,
-            dtype=torch.bool,
-        )
 
         hidden_tokens = self.img_in(hidden_states).flatten(2).transpose(1, 2)
         temporal_ids = None
@@ -941,8 +995,8 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
                         kv_cache_mode in {"reuse", "reuse_store"})
         _assembly_stamp = None
         if use_memo:
-            _cached_ids_t = torch.as_tensor(cached_temporal_ids, device=device, dtype=torch.long)
-            _temporal_sig = (tuple(_cached_ids_t.shape), tuple(_cached_ids_t.reshape(-1).tolist()))
+            _cached_ids_src = torch.as_tensor(cached_temporal_ids, dtype=torch.long)
+            _temporal_sig = (tuple(_cached_ids_src.shape), tuple(_cached_ids_src.reshape(-1).tolist()))
             _assembly_stamp = (
                 self._kv_cache_scope,
                 tuple(self._kv_cache_selected_chunk_ids or ()),
@@ -974,6 +1028,19 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
                 self._kv_assembly_freqs = cached_freqs_cis
                 self._kv_assembly_cache = {}
 
+        _graph_assembler = getattr(self, "_graph_kv_assembler", None)
+        _graph_writer = getattr(self, "_graph_kv_writer", None)
+        _txt_stream = None
+        if (
+            not skip_text_stream
+            and _TXT_PARALLEL_ENABLED
+            and device.type == "cuda"
+            and _graph_assembler is not None
+        ):
+            _txt_stream = getattr(self, "_txt_side_stream", None)
+            if _txt_stream is None:
+                _txt_stream = torch.cuda.Stream(device=device)
+                self._txt_side_stream = _txt_stream
         for layer_idx, block in enumerate(self.double_blocks):
             img, txt = block(
                 img,
@@ -981,12 +1048,16 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
                 vec,
                 vis_freqs_cis,
                 layer_idx=layer_idx,
-                kv_cache_reader=self._read_layer_kv_cache if kv_cache_mode in {"reuse", "reuse_store"} else None,
-                kv_cache_writer=self._write_layer_kv_cache if kv_cache_mode in {"store", "reuse_store"} else None,
-                kv_cache_assembler=self._assemble_layer_kv_cache_cached if use_memo else None,
+                kv_cache_reader=None if _graph_assembler is not None else (
+                    self._read_layer_kv_cache if kv_cache_mode in {"reuse", "reuse_store"} else None),
+                kv_cache_writer=_graph_writer if _graph_writer is not None else (
+                    self._write_layer_kv_cache if kv_cache_mode in {"store", "reuse_store"} else None),
+                kv_cache_assembler=_graph_assembler if _graph_assembler is not None else (
+                    self._assemble_layer_kv_cache_cached if use_memo else None),
                 skip_text_stream=skip_text_stream,
                 kv_cache_pre_rope=kv_cache_pre_rope,
                 cached_freqs_cis=cached_freqs_cis,
+                txt_side_stream=_txt_stream,
             )
 
         img = self.proj_out(self.norm_out(img))

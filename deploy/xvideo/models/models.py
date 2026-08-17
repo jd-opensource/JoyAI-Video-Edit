@@ -43,8 +43,6 @@ def build_vae(cfg, device: torch.device):
 
 def load_pipeline(cfg, dit, device: torch.device):
     vae = build_vae(cfg, device)
-    if _arch_params(cfg.vae_arch_config).get("enable_feature_caching", False):
-        vae.enable_feature_caching()
 
     tokenizer, text_encoder = load_text_encoder(
         torch_dtype=PRECISION_TO_TYPE[cfg.text_encoder_precision],

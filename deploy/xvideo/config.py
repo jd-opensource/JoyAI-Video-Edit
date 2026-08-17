@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 
-# Default checkpoint locations (users clone weights into opensource/deps/checkpoints).
+# Default checkpoint locations (users clone weights into deps/checkpoints).
 _CKPT_ROOT = Path(__file__).resolve().parents[1] / "deps" / "checkpoints"
 _DEFAULT_VAE_PATH = _CKPT_ROOT / "JoyAI-Video-Edit" / "vae"
 _DEFAULT_TEXT_ENCODER_PATH = _CKPT_ROOT / "MiMo-VL-7B-RL-2508"
@@ -15,7 +15,6 @@ class ExpConfig:
 
     seed: int = 42
 
-    # In-repo perf-optimized DiT (FA4 / FP8 / KV-memo), source-id-RoPE architecture.
     dit_ckpt: str | None = None
     dit_arch_config: dict[str, Any] = field(
         default_factory=lambda: {
@@ -59,7 +58,7 @@ class ExpConfig:
         default_factory=lambda: {"params": {"num_train_timesteps": 1000, "shift": 5.159}}
     )
 
-    ref_image_basesize: int = 512
+    ref_image_basesize: int = 768
 
 
 BASE_BUCKET_SIZE = 256
@@ -196,7 +195,7 @@ def generate_video_image_bucket(
 
     if use_ratio_based_img:
         seen_img_hw: set[tuple[int, int]] = set()
-        image_hw_list: list[tuple[int, int]] = []
+        image_hw_pairs: list[tuple[int, int]] = []
         for base_height, base_width in img_basesizes:
             for h, w in _generate_video_hw_buckets_from_ratios(
                 base_height=base_height,
@@ -205,15 +204,17 @@ def generate_video_image_bucket(
                 hw = (h, w)
                 if hw not in seen_img_hw:
                     seen_img_hw.add(hw)
-                    image_hw_list.append(hw)
+                    image_hw_pairs.append(hw)
     else:
-        image_hw_bucket_list = _generate_hw_buckets()
+        image_hw_pairs = [
+            scaled_hw(h, w) for _, _, _, h, w in _generate_hw_buckets()
+        ]
 
     if vid_basesizes is None:
-        video_hw_bucket_list = [scaled_hw(h, w) for _, _, _, h, w in image_hw_bucket_list]
+        video_hw_bucket_list = image_hw_pairs
     else:
         seen_video_hw: set[tuple[int, int]] = set()
-        video_hw_bucket_list: list[tuple[int, int]] = []
+        video_hw_bucket_list = []
         for base_height, base_width in vid_basesizes:
             for h, w in _generate_video_hw_buckets_from_ratios(
                 base_height=base_height,
@@ -225,39 +226,26 @@ def generate_video_image_bucket(
                     video_hw_bucket_list.append(hw)
 
     if bs_img > 0:
-        if use_ratio_based_img:
-            for h, w in image_hw_list:
-                bucket_list.append((bs_img, 1, 1, h, w))
-        else:
-            for _, _, _, h, w in image_hw_bucket_list:
-                sh, sw = scaled_hw(h, w)
-                bucket_list.append((bs_img, 1, 1, sh, sw))
+        for h, w in image_hw_pairs:
+            bucket_list.append((bs_img, 1, 1, h, w))
 
     temporal_step = VIDEO_TEMPORAL_BUCKET_STEP
-    aligned_min = min_temporal
-    aligned_max = max_temporal
 
     if bs_vid > 0:
-        for temporal in range(aligned_min, aligned_max + 1, temporal_step):
-            video_bs = (aligned_max + 1) // temporal * bs_vid
+        for temporal in range(min_temporal, max_temporal + 1, temporal_step):
+            video_bs = (max_temporal + 1) // temporal * bs_vid
             for h, w in video_hw_bucket_list:
                 bucket_list.append((video_bs, 1, temporal, h, w))
 
     if bs_mimg > 0:
-        if use_ratio_based_img:
-            for num_items in range(min_items, max_items + 1):
-                for h, w in image_hw_list:
-                    bucket_list.append((bs_mimg, num_items, 1, h, w))
-        else:
-            for num_items in range(min_items, max_items + 1):
-                for _, _, _, h, w in image_hw_bucket_list:
-                    sh, sw = scaled_hw(h, w)
-                    bucket_list.append((bs_mimg, num_items, 1, sh, sw))
+        for num_items in range(min_items, max_items + 1):
+            for h, w in image_hw_pairs:
+                bucket_list.append((bs_mimg, num_items, 1, h, w))
 
     if bs_mvid > 0:
         for num_items in range(min_items, max_items + 1):
-            for temporal in range(aligned_min, aligned_max + 1, temporal_step):
-                video_bs = (aligned_max + 1) // temporal * bs_mvid
+            for temporal in range(min_temporal, max_temporal + 1, temporal_step):
+                video_bs = (max_temporal + 1) // temporal * bs_mvid
                 for h, w in video_hw_bucket_list:
                     bucket_list.append((video_bs, num_items, temporal, h, w))
 

@@ -4,7 +4,6 @@ from PIL import Image
 
 from transformers import Qwen2Tokenizer, Qwen2_5_VLForConditionalGeneration, AutoProcessor
 
-from diffusers.image_processor import VaeImageProcessor
 from diffusers.models import AutoencoderKL
 from diffusers.schedulers import KarrasDiffusionSchedulers
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
@@ -18,8 +17,6 @@ PRECISION_TO_TYPE = {
 
 
 class Pipeline(DiffusionPipeline):
-    model_cpu_offload_seq = "text_encoder->transformer->vae"
-    _callback_tensor_inputs = ["latents", "prompt_embeds"]
 
     def __init__(
         self,
@@ -31,7 +28,6 @@ class Pipeline(DiffusionPipeline):
         args=None,
     ):
         super().__init__()
-        self.args = args
         self.register_modules(
             vae=vae,
             text_encoder=text_encoder,
@@ -41,9 +37,6 @@ class Pipeline(DiffusionPipeline):
         )
         self.vae_scale_factor = self.vae.ffactor_spatial
         self.vae_scale_factor_temporal = self.vae.ffactor_temporal
-
-        self.image_processor = VaeImageProcessor(
-            vae_scale_factor=self.vae_scale_factor)
 
         text_encoder_ckpt = dict(args.text_encoder_arch_config.get("params", {}))['text_encoder_ckpt']
         self.qwen_processor = AutoProcessor.from_pretrained(text_encoder_ckpt, use_fast=True)
@@ -400,7 +393,6 @@ class Pipeline(DiffusionPipeline):
         model,
         *,
         prompt_embeds: torch.Tensor,
-        prompt_embeds_mask: torch.Tensor,
         reference_image_latents: torch.Tensor,
         transformer_dtype: torch.dtype,
     ) -> None:
@@ -411,7 +403,6 @@ class Pipeline(DiffusionPipeline):
                 hidden_states=ref_img,
                 timestep=torch.zeros((ref_img.shape[0],), device=ref_img.device, dtype=transformer_dtype),
                 encoder_hidden_states=prompt_embeds,
-                encoder_hidden_states_mask=prompt_embeds_mask,
                 current_temporal_ids=torch.zeros((ref_img.shape[0], ref_frames), device=ref_img.device, dtype=torch.long),
                 kv_cache_mode="store",
                 kv_cache_scope="cond",
@@ -428,7 +419,6 @@ class Pipeline(DiffusionPipeline):
         clean_chunk_latents: torch.Tensor,
         chunk_temporal_ids: torch.Tensor,
         prompt_embeds: torch.Tensor,
-        prompt_embeds_mask: torch.Tensor,
         active_chunk_id: int,
         history_chunk_ids: Optional[List[int]],
         pre_rope: bool = False,
@@ -451,7 +441,6 @@ class Pipeline(DiffusionPipeline):
                     dtype=clean_chunk_latents.dtype,
                 ),
                 encoder_hidden_states=prompt_embeds,
-                encoder_hidden_states_mask=prompt_embeds_mask,
                 current_temporal_ids=chunk_temporal_ids,
                 cached_temporal_ids=cached_temporal_ids,
                 kv_cache_mode=store_mode,

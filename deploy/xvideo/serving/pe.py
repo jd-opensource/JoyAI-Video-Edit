@@ -10,9 +10,9 @@ from PIL import Image
 
 logger = logging.getLogger("joyomni.pe")
 
-DEFAULT_MODEL = "Qwen2.5-VL-72B"
-DEFAULT_BASE_URL = None
-DEFAULT_API_KEY = None
+DEFAULT_MODEL = os.environ.get("PE_MODEL", "")
+DEFAULT_BASE_URL = os.environ.get("OPENAI_BASE_URL", "")
+DEFAULT_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 MAX_RETRIES = 8
 
 
@@ -173,11 +173,9 @@ class PromptEnhancer:
     ):
         from openai import OpenAI
 
-        api_key = api_key or os.environ.get("PE_API_KEY") or os.environ.get("OPENAI_API_KEY") or DEFAULT_API_KEY
-        base_url = base_url or os.environ.get("PE_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or DEFAULT_BASE_URL
+        api_key = api_key or os.environ.get("OPENAI_API_KEY") or DEFAULT_API_KEY
+        base_url = base_url or os.environ.get("OPENAI_BASE_URL") or DEFAULT_BASE_URL
         self.model = model or os.environ.get("PE_MODEL") or DEFAULT_MODEL
-        if not api_key:
-            raise RuntimeError("Prompt enhancement requires PE_API_KEY or OPENAI_API_KEY.")
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.max_retries = max_retries
 

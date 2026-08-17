@@ -10,7 +10,7 @@ Ops provided (no sgl-kernel / sglang dependency):
 
 GPU arch coverage is chosen from the local nvcc version:
   - always: sm_80, sm_89, sm_90
-  - CUDA >= 12.8: also sm_100a (B200) and sm_120a (RTX 5090)
+  - CUDA >= 12.8: also sm_100a (B200) and sm_120a (RTX PRO 6000 / RTX 5090)
 So building on a CUDA 12.8+ toolchain automatically yields Blackwell support.
 """
 import os
@@ -109,7 +109,7 @@ if NO_FP8:
 include_dirs = [str(THIS_DIR / "include")]
 
 # cutlass (for fp8_scaled_mm). Point JOYOMNI_OPS_CUTLASS_DIR at a cutlass checkout
-# (tag 57e3cfb47a2d9e0d46eb6335c3dc411498efa198 matches the reference build).
+# (commit dcf215af matches the reference build).
 cutlass_dir = os.environ.get("JOYOMNI_OPS_CUTLASS_DIR")
 if not NO_FP8:
     if cutlass_dir:

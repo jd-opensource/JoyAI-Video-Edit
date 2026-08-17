@@ -1,45 +1,18 @@
 from __future__ import annotations
 
-import functools
-
 import torch
 import torch.nn as nn
+
+from xvideo.inductor_autotune_fix import install as _install_autotune_fix
+
+# Must run before any compiled function executes, so warm restarts reuse the
+# on-disk autotune results instead of re-running coordinate descent.
+_install_autotune_fix()
 
 
 _configured: set[int] = set()
 _configured_encode: set[int] = set()
 _configured_encode_dynamic: set[int] = set()
-
-
-def _original_callable(module, name: str):
-    original_name = f"_vae_compile_original{name}"
-    original = getattr(module, original_name, None)
-    if original is not None:
-        return original
-
-    original = getattr(module, name)
-    while hasattr(original, "_torchdynamo_orig_callable"):
-        original = original._torchdynamo_orig_callable
-    setattr(module, original_name, original)
-    return original
-
-
-def _is_fx_tracing() -> bool:
-    symbolic_trace = torch.fx._symbolic_trace
-    check = getattr(symbolic_trace, "is_fx_symbolic_tracing", None)
-    if check is None:
-        check = symbolic_trace.is_fx_tracing
-    return bool(check())
-
-
-def _fx_safe_compiled(compiled, fallback):
-    @functools.wraps(fallback)
-    def wrapped(*args, **kwargs):
-        if _is_fx_tracing():
-            return fallback(*args, **kwargs)
-        return compiled(*args, **kwargs)
-
-    return wrapped
 
 
 def maybe_setup_decode(vae) -> None:
@@ -51,14 +24,10 @@ def maybe_setup_decode(vae) -> None:
             m.weight.data = m.weight.data.to(memory_format=torch.channels_last_3d)
             n_conv += 1
     if hasattr(vae, "_decode"):
-        original = _original_callable(vae, "_decode")
-        compiled = torch.compile(original, mode="max-autotune-no-cudagraphs", dynamic=False)
-        vae._decode = _fx_safe_compiled(compiled, original)
+        vae._decode = torch.compile(vae._decode, mode="max-autotune-no-cudagraphs", dynamic=False)
         target = "_decode"
     elif hasattr(vae, "decode"):
-        original = _original_callable(vae, "decode")
-        compiled = torch.compile(original, mode="max-autotune-no-cudagraphs", dynamic=False)
-        vae.decode = _fx_safe_compiled(compiled, original)
+        vae.decode = torch.compile(vae.decode, mode="max-autotune-no-cudagraphs", dynamic=False)
         target = "decode"
     else:
         raise RuntimeError("VAE has neither _decode nor decode; cannot compile")
@@ -79,14 +48,10 @@ def maybe_setup_encode(vae) -> None:
             m.weight.data = m.weight.data.to(memory_format=torch.channels_last_3d)
             n_conv += 1
     if hasattr(vae, "_encode"):
-        original = _original_callable(vae, "_encode")
-        compiled = torch.compile(original, mode="max-autotune-no-cudagraphs", dynamic=False)
-        vae._encode = _fx_safe_compiled(compiled, original)
+        vae._encode = torch.compile(vae._encode, mode="max-autotune-no-cudagraphs", dynamic=False)
         target = "_encode"
     elif hasattr(vae, "encode"):
-        original = _original_callable(vae, "encode")
-        compiled = torch.compile(original, mode="max-autotune-no-cudagraphs", dynamic=False)
-        vae.encode = _fx_safe_compiled(compiled, original)
+        vae.encode = torch.compile(vae.encode, mode="max-autotune-no-cudagraphs", dynamic=False)
         target = "encode"
     else:
         raise RuntimeError("VAE has neither _encode nor encode; cannot compile")
@@ -123,13 +88,12 @@ def maybe_setup_encode_dynamic(vae) -> None:
     if id(vae) in _configured_encode_dynamic:
         return
     if hasattr(vae, "_encode"):
-        dynamic_core = _original_callable(vae, "_encode")
+        core = getattr(vae, "_encode")
     elif hasattr(vae, "encode"):
-        dynamic_core = _original_callable(vae, "encode")
+        core = getattr(vae, "encode")
     else:
         raise RuntimeError("VAE has neither _encode nor encode; cannot compile")
-    compiled = torch.compile(dynamic_core, mode="max-autotune-no-cudagraphs", dynamic=True)
-    vae._encode_dynamic = _fx_safe_compiled(compiled, dynamic_core)
+    vae._encode_dynamic = torch.compile(core, mode="max-autotune-no-cudagraphs", dynamic=True)
     _configured_encode_dynamic.add(id(vae))
     print("[vae_compile] compiled vae._encode_dynamic (dynamic=True, reference-image path)")
 
