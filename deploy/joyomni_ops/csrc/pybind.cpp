@@ -56,3 +56,17 @@ TORCH_LIBRARY_IMPL(joyomni_ops, CUDA, m) {
   m.impl("fp8_scaled_mm", &joyomni_ops::fp8_scaled_mm);
 #endif
 }
+
+// Windows CUDAExtension always /EXPORT:PyInit__C. TORCH_LIBRARY has no module
+// init, so give the linker a tiny Python module.
+#include <Python.h>
+PyMODINIT_FUNC PyInit__C(void) {
+  static struct PyModuleDef moduledef = {
+      PyModuleDef_HEAD_INIT,
+      "_C",
+      "joyomni_ops CUDA kernels",
+      -1,
+      nullptr,
+  };
+  return PyModule_Create(&moduledef);
+}

@@ -1299,7 +1299,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
 
             app.state.ws_debug = ws_debug
 
-            HOLDER_IDLE_TIMEOUT_S = 10.0
+            HOLDER_IDLE_TIMEOUT_S = 1800.0
             last_activity = time.monotonic()
             last_frames_out = frames_out
             while True:
@@ -1515,7 +1515,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
 
                         if session is not None:
                             await asyncio.to_thread(session.flush_pending)
-                            _flush_deadline = time.monotonic() + 20.0
+                            _flush_deadline = time.monotonic() + 1800.0
                             while frames_out < frames_in and time.monotonic() < _flush_deadline:
                                 await asyncio.sleep(0.05)
                         last_activity = time.monotonic()
@@ -2065,7 +2065,8 @@ def main() -> None:
     from xvideo.lowvram import apply_vram_cap_for_testing
     apply_vram_cap_for_testing(args.device)
     app = create_app(args)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info", ws_max_size=32 * 1024 * 1024, ws_per_message_deflate=False, loop="uvloop")
+    loop_impl = "asyncio" if sys.platform == "win32" else "uvloop"
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info", ws_max_size=32 * 1024 * 1024, ws_per_message_deflate=False, loop=loop_impl)
 
 
 if __name__ == "__main__":

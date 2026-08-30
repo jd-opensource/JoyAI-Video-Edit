@@ -1,3 +1,4 @@
+import gc
 import os
 
 import torch
@@ -21,6 +22,7 @@ def load_text_encoder(
         dtype=torch_dtype,
         local_files_only=True,
         attn_implementation="sdpa",
+        device_map="cpu",
     )
     if cpu_offload:
         # The 7B text encoder runs only at session start / KV reset, so it stays
@@ -162,13 +164,16 @@ def load_dit(cfg, device: torch.device) -> torch.nn.Module:
             state_dict = state_dict["model"]
 
     dtype = PRECISION_TO_TYPE[cfg.dit_precision]
-    # Low-VRAM: build + fill on CPU, then stage blocks to the GPU as FP8 (the
-    # bf16 model alone would already overflow a 32GB card).
-    build_device = torch.device("cpu") if low_vram else device
-    model = Transformer3DModel(
-        dtype=dtype, device=build_device, **_arch_params(cfg.dit_arch_config)
-    )
-    model.to(device=build_device)
+    # Low-VRAM: build on meta (no host RAM), assign mmap tensors in place, then
+    # stage blocks to the GPU as FP8. A CPU-built bf16 copy plus the 32 GiB pth
+    # mmap exceeds 32 GB free host RAM on this box.
+    build_device = torch.device("meta") if low_vram else device
+    with torch.device(build_device):
+        model = Transformer3DModel(
+            dtype=dtype, device=build_device, **_arch_params(cfg.dit_arch_config)
+        )
+    if not low_vram:
+        model.to(device=build_device)
 
     if state_dict is not None:
         for prefix in ("model.", "module.", "transformer."):
@@ -189,11 +194,15 @@ def load_dit(cfg, device: torch.device) -> torch.nn.Module:
                 v = v.reshape_as(v.new_zeros(model.img_in.weight.shape))
             load_state_dict[k] = v
 
-        missing_keys, unexpected_keys = model.load_state_dict(load_state_dict, strict=True)
+        missing_keys, unexpected_keys = model.load_state_dict(
+            load_state_dict, strict=True, assign=low_vram
+        )
         if missing_keys:
             logger.warning(f"Missing keys when loading DiT: {missing_keys[:20]}")
         if unexpected_keys:
             logger.warning(f"Unexpected keys when loading DiT: {unexpected_keys[:20]}")
+        del state_dict, load_state_dict
+        gc.collect()
 
     total_params = sum(p.numel() for p in model.parameters())
     logger.info(f"Instantiate model with {total_params / 1e9:.2f}B parameters")

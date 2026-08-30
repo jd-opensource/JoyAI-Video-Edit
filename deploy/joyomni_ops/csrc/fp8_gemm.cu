@@ -1341,6 +1341,8 @@ typename GemmType::Gemm::Arguments prepare_sm120_fp8_args(
 
   typename GemmKernel::ProblemShape prob_shape = {m, n, k, 1};
   cutlass::KernelHardwareInfo hw_info;
+  hw_info.device_id = static_cast<int>(a.get_device());
+  hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
   typename GemmKernel::TileSchedulerArguments scheduler = {};
 
   auto ptr_c = static_cast<ElementOutput*>(out.data_ptr());
@@ -1382,9 +1384,15 @@ void launch_sm120_fp8_scaled_mm(
   auto workspace = torch::empty(workspace_size, workspace_options);
   auto stream = at::cuda::getCurrentCUDAStream(a.get_device());
   auto can_implement = gemm_op.can_implement(args);
-  TORCH_CHECK(can_implement == cutlass::Status::kSuccess)
+  TORCH_CHECK(
+      can_implement == cutlass::Status::kSuccess,
+      "cutlass sm120 can_implement failed: ",
+      cutlassGetStatusString(can_implement));
   auto status = gemm_op.run(args, workspace.data_ptr(), stream);
-  TORCH_CHECK(status == cutlass::Status::kSuccess)
+  TORCH_CHECK(
+      status == cutlass::Status::kSuccess,
+      "cutlass sm120 run failed: ",
+      cutlassGetStatusString(status));
 }
 
 template <typename OutType>

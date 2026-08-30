@@ -93,15 +93,19 @@ if not NO_FP8:
 
 nvcc_flags = [
     "-O3",
-    "-std=c++17",
+    "-std=c++20",
     "--expt-relaxed-constexpr",
     "--expt-extended-lambda",
     "-U__CUDA_NO_HALF_OPERATORS__",
     "-U__CUDA_NO_HALF_CONVERSIONS__",
     "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+    "-DUSE_CUDA=1",
 ] + _gencodes()
 
-cxx_flags = ["-O3", "-std=c++17"]
+cxx_flags = ["-O3", "-std=c++20"]
+if os.name == "nt":
+    nvcc_flags += ["-Xcompiler", "/Zc:preprocessor", "-Xcompiler", "/std:c++20"]
+    cxx_flags += ["/Zc:preprocessor", "/std:c++20"]
 if NO_FP8:
     nvcc_flags.append("-DJOYOMNI_OPS_NO_FP8")
     cxx_flags.append("-DJOYOMNI_OPS_NO_FP8")

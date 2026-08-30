@@ -97,6 +97,68 @@ if _FAST_ACCUM:
         return (64, 256, 8, 3) if M >= 1800 else (64, 128, 8, 3)
 
 
+_CUTLASS_FP8_MM_OK: Optional[bool] = None
+
+
+def _dequant_bf16_mm(
+    x_q: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_fp8: torch.Tensor,
+    weight_scale: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    y = (x_q.float() * x_scale) @ (weight_fp8.float() * weight_scale)
+    y = y.to(out_dtype)
+    if bias is not None:
+        y = y + bias
+    return y
+
+
+def _cutlass_fp8_mm_ok() -> bool:
+    global _CUTLASS_FP8_MM_OK
+    if _CUTLASS_FP8_MM_OK is not None:
+        return _CUTLASS_FP8_MM_OK
+    if os.environ.get("JOYOMNI_FP8_CUTLASS", "1").strip().lower() in {"0", "false", "no", "off"}:
+        print("#####[FP8] JOYOMNI_FP8_CUTLASS=0; using bf16 dequant GEMM", flush=True)
+        _CUTLASS_FP8_MM_OK = False
+        return False
+    import subprocess
+    import sys
+
+    probe = (
+        "import torch\n"
+        "from joyomni_ops import fp8_scaled_mm, sgl_per_token_quant_fp8\n"
+        "d='cuda'; n=256\n"
+        "a=torch.randn(n,n,device=d,dtype=torch.bfloat16)\n"
+        "b=torch.randn(n,n,device=d,dtype=torch.bfloat16)\n"
+        "aq=torch.empty(n,n,device=d,dtype=torch.float8_e4m3fn)\n"
+        "as_=torch.empty(n,1,device=d,dtype=torch.float32)\n"
+        "bnk=b.t().contiguous()\n"
+        "bq=torch.empty(n,n,device=d,dtype=torch.float8_e4m3fn)\n"
+        "bs=torch.empty(n,1,device=d,dtype=torch.float32)\n"
+        "sgl_per_token_quant_fp8(a,aq,as_)\n"
+        "sgl_per_token_quant_fp8(bnk,bq,bs)\n"
+        "out=fp8_scaled_mm(aq,bq.t(),as_,bs,out_dtype=torch.bfloat16,bias=None)\n"
+        "torch.cuda.synchronize()\n"
+        "assert torch.isfinite(out).all()\n"
+        "print('ok')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    _CUTLASS_FP8_MM_OK = result.returncode == 0 and "ok" in result.stdout
+    if not _CUTLASS_FP8_MM_OK:
+        err = (result.stderr or result.stdout or "probe failed").strip().splitlines()
+        tail = err[-1] if err else "probe failed"
+        print(f"#####[FP8] cutlass fp8_scaled_mm unavailable ({tail}); using bf16 dequant GEMM", flush=True)
+    return _CUTLASS_FP8_MM_OK
+
+
 def _quantize_weight_per_channel(w_bf16: torch.Tensor):
     w_kn = w_bf16.t().contiguous()
     K, N = w_kn.shape
@@ -164,6 +226,11 @@ class Fp8Linear(nn.Module):
             )
             return y.reshape(*orig_shape[:-1], self.out_features)
         sgl_per_token_quant_fp8(x_2d, x_q, x_scale)
-        y = fp8_scaled_mm(x_q, self.weight_fp8, x_scale, self.weight_scale,
-                          out_dtype=self.out_dtype, bias=self.bias)
+        if _cutlass_fp8_mm_ok():
+            y = fp8_scaled_mm(x_q, self.weight_fp8, x_scale, self.weight_scale,
+                              out_dtype=self.out_dtype, bias=self.bias)
+        else:
+            y = _dequant_bf16_mm(
+                x_q, x_scale, self.weight_fp8, self.weight_scale, self.bias, self.out_dtype
+            )
         return y.reshape(*orig_shape[:-1], self.out_features)

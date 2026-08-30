@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import sys
+
 import torch
 import torch.nn as nn
 
@@ -15,6 +18,15 @@ _configured_encode: set[int] = set()
 _configured_encode_dynamic: set[int] = set()
 
 
+def _compile_wanted() -> bool:
+    raw = os.environ.get("JOYOMNI_VAE_COMPILE", "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    return sys.platform != "win32"
+
+
 def maybe_setup_decode(vae) -> None:
     if id(vae) in _configured:
         return
@@ -23,6 +35,10 @@ def maybe_setup_decode(vae) -> None:
         if isinstance(m, nn.Conv3d):
             m.weight.data = m.weight.data.to(memory_format=torch.channels_last_3d)
             n_conv += 1
+    if not _compile_wanted():
+        _configured.add(id(vae))
+        print(f"[vae_compile] converted {n_conv} Conv3d weights to channels_last_3d; compile skipped")
+        return
     if hasattr(vae, "_decode"):
         vae._decode = torch.compile(vae._decode, mode="max-autotune-no-cudagraphs", dynamic=False)
         target = "_decode"
@@ -47,6 +63,10 @@ def maybe_setup_encode(vae) -> None:
         if isinstance(m, nn.Conv3d):
             m.weight.data = m.weight.data.to(memory_format=torch.channels_last_3d)
             n_conv += 1
+    if not _compile_wanted():
+        _configured_encode.add(id(vae))
+        print(f"[vae_compile] converted {n_conv} Conv3d weights to channels_last_3d; encode compile skipped")
+        return
     if hasattr(vae, "_encode"):
         vae._encode = torch.compile(vae._encode, mode="max-autotune-no-cudagraphs", dynamic=False)
         target = "_encode"
@@ -93,6 +113,11 @@ def maybe_setup_encode_dynamic(vae) -> None:
         core = getattr(vae, "encode")
     else:
         raise RuntimeError("VAE has neither _encode nor encode; cannot compile")
+    if not _compile_wanted():
+        vae._encode_dynamic = core
+        _configured_encode_dynamic.add(id(vae))
+        print("[vae_compile] encode_dynamic uses eager encode; compile skipped")
+        return
     vae._encode_dynamic = torch.compile(core, mode="max-autotune-no-cudagraphs", dynamic=True)
     _configured_encode_dynamic.add(id(vae))
     print("[vae_compile] compiled vae._encode_dynamic (dynamic=True, reference-image path)")
