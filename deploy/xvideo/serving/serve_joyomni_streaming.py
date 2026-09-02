@@ -878,7 +878,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             _wire_chunk = h264_stream is not None or (
                 encoded_frames and isinstance(encoded_frames[0], (bytes, bytearray))
             )
-            _fps = float(args.fps)
+            _fps = max(1.0, float(args.fps))
             _outstanding = None
             if _wire_chunk and flow["recv"] is not None and (time.time() - flow["at"]) < 5.0:
                 _outstanding = max(0, (frames_out - int(flow.get("base") or 0)) - int(flow["recv"]))
@@ -1409,7 +1409,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         fg_stable = max(1, int(payload.get("fg_stable_frames", args.face_gate_stable_frames)))
                         fg_absent = max(1, int(args.presence_absent_frames))
                         fg_return = max(1, int(args.presence_return_frames))
-                        _gate_fps = float(payload.get("fps") or args.fps or 24.0)
+                        _gate_fps = max(1.0, float(payload.get("fps") or args.fps or 24.0))
                         _fscale = _gate_fps / 24.0
                         fg_stable = max(1, int(round(fg_stable * _fscale)))
                         fg_absent = max(1, int(round(fg_absent * _fscale)))
