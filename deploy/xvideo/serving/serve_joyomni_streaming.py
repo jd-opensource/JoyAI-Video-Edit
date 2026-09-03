@@ -1459,8 +1459,14 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             else:
                                 pe_defer = True
                         _align = runtime.pipeline.vae.stem.stride * 8
-                        _sh = _snap_to_align(int(payload.get("height", args.height)), _align)
-                        _sw = _snap_to_align(int(payload.get("width", args.width)), _align)
+                        _req_h = int(payload.get("height", args.height))
+                        _req_w = int(payload.get("width", args.width))
+                        _long = _snap_to_align(max(args.height, args.width), _align)
+                        _short = _snap_to_align(min(args.height, args.width), _align)
+                        if _req_h > _req_w:
+                            _sh, _sw = _long, _short
+                        else:
+                            _sh, _sw = _short, _long
                         session_settings = StreamingSettings(
                             height=_sh,
                             width=_sw,
