@@ -9,7 +9,7 @@ Ops provided (no sgl-kernel / sglang dependency):
   - fp8_scaled_mm                : FP8 per-token x per-channel scaled GEMM (cutlass)
 
 GPU arch coverage is chosen from the local nvcc version:
-  - always: sm_80, sm_89, sm_90
+  - always: sm_80, sm_89, sm_90a
   - CUDA >= 12.8: also sm_100a (B200) and sm_120a (RTX PRO 6000 / RTX 5090)
 So building on a CUDA 12.8+ toolchain automatically yields Blackwell support.
 """
@@ -57,7 +57,12 @@ def _gencodes():
     flags = [
         "-gencode=arch=compute_80,code=sm_80",
         "-gencode=arch=compute_89,code=sm_89",
-        "-gencode=arch=compute_90,code=sm_90",
+        # Hopper must be sm_90a: fp8_scaled_mm selects cutlass'
+        # KernelTmaWarpSpecializedPingpongFP8FastAccum, whose WGMMA path is
+        # arch-conditional. Built as plain sm_90 it compiles and loads, then
+        # aborts every launch ("Arch conditional MMA instruction used without
+        # targeting appropriate compute capability").
+        "-gencode=arch=compute_90a,code=sm_90a",
     ]
     if (mj, mn) >= (12, 8):
         flags += [
