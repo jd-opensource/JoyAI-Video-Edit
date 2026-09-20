@@ -1659,7 +1659,10 @@ class JoyOmniV2VStreamingSession:
         _enc_dev_type = torch.device(encode_device).type
         _enc_ctx = _autocast_ctx(_enc_dev_type, self.vae_dtype, self.vae_autocast_enabled)
         with _enc_ctx:
-            ref_latent = self.pipeline._sample_vae_latents(
+            # Encode the startup frame or the complete overlapping window once.
+            # The sequence wrapper also encodes its first frame separately,
+            # but streaming only retains the final latent below.
+            ref_latent = self.pipeline._encode_vae_single(
                 source_window,
                 enable_denormalization=self.enable_denormalization,
             )
