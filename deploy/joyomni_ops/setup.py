@@ -57,11 +57,9 @@ def _gencodes():
     flags = [
         "-gencode=arch=compute_80,code=sm_80",
         "-gencode=arch=compute_89,code=sm_89",
-        # Hopper must be sm_90a: fp8_scaled_mm selects cutlass'
-        # KernelTmaWarpSpecializedPingpongFP8FastAccum, whose WGMMA path is
-        # arch-conditional. Built as plain sm_90 it compiles and loads, then
-        # aborts every launch ("Arch conditional MMA instruction used without
-        # targeting appropriate compute capability").
+        # Hopper FP8 GEMM uses arch-conditional WGMMA instructions, requiring
+        # compute_90a/sm_90a. A plain sm_90 build can compile and load, but
+        # launching the Hopper FP8 kernel hits CUTLASS's architecture guard.
         "-gencode=arch=compute_90a,code=sm_90a",
     ]
     if (mj, mn) >= (12, 8):
