@@ -196,10 +196,19 @@ color, shape, material, pattern and construction. Be concrete and accurate; do n
 Keep the entire request, including any explicit exceptions, extra edits and exact quoted text.
 
 # TRANSFER SCOPE
-- Clothes: put the requested garment on the person in the video, replacing the corresponding
-  original garment. Match the reference's cut, silhouette, length, color and visible details.
-  A top-only or trousers-only request changes only that garment; a complete outfit transfers the
-  visible outfit. Preserve the source person's identity, face, hair, body proportions and pose.
+Explicit requested edits and exceptions override the default preservation rules below. Determine
+all requested changes first; preserve only attributes outside that combined edit scope.
+- Clothes: identify the visible source clothing layers and the requested replacement scope before
+  choosing what to preserve. A request explicitly targeting an inner top, outer garment or trousers
+  changes only that layer; a complete outfit transfers the visible outfit. For an unqualified
+  request to replace the top/upper-body clothing, make the reference top the visible upper-body
+  garment: replace existing layers that would cover or conceal it, including outerwear or
+  shoulder-draped coverings, unless the user explicitly keeps them. Do not classify these clothing
+  layers as accessories to preserve. Top-only edits keep lower-body clothing, and trousers-only
+  edits keep upper-body clothing. Name the source garments/layers being replaced in the final
+  prompt, then describe the reference garment's cut, silhouette, length, color and visible details.
+  Preserve the source person's identity, face, hair, body proportions and pose within the unchanged
+  scope.
   The reference model's face, body, pose and background are not part of a clothing transfer.
   Fit the garment naturally to the source body, with correct overlap and contact at hands/arms.
 - Background: replace the original environment with the environment in the reference, describing
@@ -226,11 +235,16 @@ shoulder fabric, sleeves and chest texture. For an outfit, describe only its vis
 and inner layer. Completely omit descriptions of offscreen garments, waist/hip shaping, skirt
 length, trouser legs, hemlines, feet and full-body silhouettes from the final prompt, including
 negative mentions of those details. This is a visibility rule, not a change in the user's outfit
-choice. Full-body source shots still receive the full requested outfit. Keep the source head,
-shoulder and arm positions and subject scale fixed; adapt the clothing to those positions.
-Explicitly preserve visible source accessories and their placement over or under the new fabric,
-especially glasses and headphones. State the actual visible crop directly; do not output an
-"if visible" or "if cropped" condition. Never enlarge the visible body region to show a garment.
+choice. Full-body source shots still receive the full requested outfit. At each output frame,
+match the person's head, shoulder and arm positions, pose, subject scale and framing to the
+corresponding source-video frame; let the clothing follow the source motion with natural
+deformation. Do not freeze the person in the provided frame's pose or suppress source movement.
+Preserve all visible source accessories that fall outside the requested edit scope. Explicitly
+apply any requested accessory removal, replacement or modification; never also describe that
+accessory as unchanged. Retained accessories follow the source body's motion
+and placement, with the new fabric layered naturally around them. State the actual visible crop
+directly; do not output an "if visible" or "if cropped" condition. Never enlarge the visible body
+region to show a garment.
 """
 
 
