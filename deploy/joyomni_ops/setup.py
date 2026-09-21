@@ -42,7 +42,7 @@ def _cuda_version():
 def _gencodes():
     """-gencode flags. Blackwell (sm_100a/sm_120a) needs nvcc >= 12.8."""
     mj, mn = _cuda_version()
-    # Allow override, e.g. JOYOMNI_OPS_CUDA_ARCHS="90;120a"
+    # Allow override, e.g. JOYOMNI_OPS_CUDA_ARCHS="90a;120a"
     override = os.environ.get("JOYOMNI_OPS_CUDA_ARCHS")
     if override:
         flags = []
@@ -77,7 +77,7 @@ def _gencodes():
         # only — for tuned Blackwell SASS, build on CUDA >= 12.8.
         flags += ["-gencode=arch=compute_90,code=compute_90"]
         print(
-            f"[joyomni_ops] nvcc {mj}.{mn} < 12.8: SASS sm_80/89/90 + sm_90 PTX "
+            f"[joyomni_ops] nvcc {mj}.{mn} < 12.8: SASS sm_80/89/90a + sm_90 PTX "
             f"(JIT fallback for Blackwell). Build on CUDA >= 12.8 for native sm_100a/sm_120a."
         )
     return flags
