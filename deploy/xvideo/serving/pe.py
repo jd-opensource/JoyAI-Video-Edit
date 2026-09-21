@@ -177,6 +177,62 @@ by case:
   Objective names them.
 """
 
+RV2V_SYSTEM_PROMPT = """You write precise English instructions for reference-image-guided video
+editing (RV2V). Understand the source video and the separate reference image, then describe only
+the requested transfer. The source video determines the subject, pose, motion, framing and scene;
+the reference supplies only the visual attributes requested by the user."""
+
+RV2V_TEMPLATE = """# INPUT
+User request: {user_prompt}
+Image 0 is the REFERENCE IMAGE: the donor of the requested appearance, garment, object or scene.
+Any subsequent images are SOURCE VIDEO FRAMES: the video to edit.
+
+# OUTPUT
+Return ONLY one cohesive English editing prompt, about 80-140 words. No explanation or labels.
+Start with a direct edit instruction, naming the target in the video and the requested item from
+the reference image. Refer to it as "the reference image", never by image number in the output.
+Inspect the reference and describe 3-5 distinctive visible features relevant to the request:
+color, shape, material, pattern and construction. Be concrete and accurate; do not invent details.
+Keep the entire request, including any explicit exceptions, extra edits and exact quoted text.
+
+# TRANSFER SCOPE
+- Clothes: put the requested garment on the person in the video, replacing the corresponding
+  original garment. Match the reference's cut, silhouette, length, color and visible details.
+  A top-only or trousers-only request changes only that garment; a complete outfit transfers the
+  visible outfit. Preserve the source person's identity, face, hair, body proportions and pose.
+  The reference model's face, body, pose and background are not part of a clothing transfer.
+  Fit the garment naturally to the source body, with correct overlap and contact at hands/arms.
+- Background: replace the original environment with the environment in the reference, describing
+  its main visible structures. Keep the source foreground person and their clothing. Remove old
+  background furniture only when it is actually visible. Do not add people from the reference.
+- Person/character replacement: describe the reference face/head AND the requested body/outfit.
+  Preserve source pose and motion, without preserving identity attributes that must change.
+- Object/accessory: transfer only the requested object, at its functional position and scale.
+- Style: apply only the requested visual style from the reference to the specified content.
+
+Close with a concise preservation clause for what stays unchanged. Keep the original background
+unless the user requests changing it. Do not copy reference framing, pose, lighting, typography,
+logos, watermarks, props or other garments unless requested. Do not describe invisible body parts
+or force the camera to reveal the whole garment. Avoid vague quality words and excessive negative
+instructions. The edit is already fully present in the first output frame and follows source
+motion consistently; do not describe a gradual transformation.
+
+# SOURCE FRAMING — CLOTHING EDITS
+First identify the source person's actual visible crop and pose. In a seated chest-up or
+head-and-shoulders view, begin the final editing prompt by anchoring the edit to that existing
+close-up and seated pose. Describe only the reference garment surfaces that can appear inside
+this source crop. For a dress, name the visible upper part of the dress and describe its neckline,
+shoulder fabric, sleeves and chest texture. For an outfit, describe only its visible jacket/top
+and inner layer. Completely omit descriptions of offscreen garments, waist/hip shaping, skirt
+length, trouser legs, hemlines, feet and full-body silhouettes from the final prompt, including
+negative mentions of those details. This is a visibility rule, not a change in the user's outfit
+choice. Full-body source shots still receive the full requested outfit. Keep the source head,
+shoulder and arm positions and subject scale fixed; adapt the clothing to those positions.
+Explicitly preserve visible source accessories and their placement over or under the new fabric,
+especially glasses and headphones. State the actual visible crop directly; do not output an
+"if visible" or "if cropped" condition. Never enlarge the visible body region to show a garment.
+"""
+
 
 def _downscale(image: Image.Image, max_side: int = PE_IMAGE_MAX_SIDE) -> Image.Image:
     if max_side and max_side > 0:
@@ -324,9 +380,18 @@ class PromptEnhancer:
         logger.error("PE failed after %d attempts: %s", self.max_retries, last_err)
         return None
 
-    def __call__(self, task_type, user_prompt, video=None) -> Optional[str]:
+    def __call__(self, task_type, user_prompt, video=None, ref_image=None) -> Optional[str]:
         if not user_prompt or not user_prompt.strip():
             return user_prompt
         video_frames = _video_frames_to_b64(video)
+        if task_type == "rv2v":
+            reference = _img_to_b64(ref_image)
+            if reference is None:
+                logger.warning("RV2V PE needs a reference image; using raw prompt")
+                return user_prompt
+            text = RV2V_TEMPLATE.format(user_prompt=user_prompt)
+            return self._chat(
+                RV2V_SYSTEM_PROMPT, text, [reference, *video_frames], raw_fallback=user_prompt,
+            ) or user_prompt
         text = V2V_TEMPLATE.format(user_prompt=user_prompt)
         return self._chat(SYSTEM_PROMPT, text, video_frames, raw_fallback=user_prompt) or user_prompt

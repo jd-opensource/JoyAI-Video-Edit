@@ -376,9 +376,10 @@ def _enhance_prompt_sync(
     raw_prompt: str,
     pe_frame: Image.Image | None,
     pe_model: str | None,
+    ref_image: Image.Image | None = None,
 ) -> dict[str, Any]:
     started = time.time()
-    task_type = "v2v"
+    task_type = "rv2v" if ref_image is not None else "v2v"
     enhanced_prompt = raw_prompt
     error = None
     model = pe_model or DEFAULT_PE_MODEL
@@ -391,6 +392,7 @@ def _enhance_prompt_sync(
             task_type,
             raw_prompt,
             video=[pe_frame] if pe_frame is not None else None,
+            ref_image=ref_image,
         )
         if isinstance(enhanced, str) and enhanced.strip():
             enhanced_prompt = enhanced.strip()
@@ -1901,7 +1903,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         gate_state["pe_anchor"] = None
                         await _send_json({"type": "pe_running", "frames_in": frames_in})
 
-                        async def _run_pe(_sess=session, _anchor=anchor, _raw=raw_session_prompt):
+                        async def _run_pe(_sess=session, _anchor=anchor, _raw=raw_session_prompt, _ref=ref_image):
                             nonlocal pe_defer, pe_report, pe_task
                             try:
                                 report = await asyncio.wait_for(
@@ -1909,6 +1911,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                         _enhance_prompt_sync,
                                         raw_prompt=_raw,
                                         pe_frame=_anchor, pe_model=args.pe_model,
+                                        ref_image=_ref,
                                     ),
                                     timeout=max(1.0, float(args.pe_timeout_s)),
                                 )
