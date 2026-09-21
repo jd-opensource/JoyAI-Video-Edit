@@ -56,10 +56,10 @@ V2V_TEMPLATE = """# INPUT DATA
    background/scene replacement, no art-style or medium change (anime / painting / cartoon look and
    similar), no relighting or color grading beyond what a requested edit needs for integration, no
    camera motion, speed changes, depth-of-field effects, or extra elements on your own initiative.
-   Unless the Target Objective names an art style, the edited video stays photorealistic
-   live-action — never add a painting / ink / anime / cartoon style because the scene's culture or
-   era suggests one. Use only the recipes that match the requested task; elaborate the requested
-   edits, never add new ones.
+   Preserve the source video's existing visual style and medium unless the Target Objective
+   explicitly requests changing them. Do not introduce a new style merely because the scene's
+   culture or era suggests one. Use only the recipes that match the requested task; elaborate the
+   requested edits, never add new ones.
 2. Priority: Describe the edits in the Target Objective's order of importance — the primary subject
    edit comes FIRST and carries the most detail (for a well-known character or person, spell out
    their canonical visual features); secondary edits such as a background swap get one concise
@@ -98,10 +98,17 @@ FOUNDATION of your prompt, and seamlessly expand them into a highly detailed, co
 - Background Replacement: "Replace the original background with [highly detailed description of the
   new environment], ensuring the foreground elements are seamlessly integrated with matching global
   illumination, reflections, and realistic cast shadows."
-  Whenever this recipe is used, append this clause verbatim right after it: "the area directly
-  behind the subject's head and shoulders shows only the new environment — the original chair and
-  its headrest are gone." In an output that does not replace the background, that clause and any
-  mention of removing the chair, headrest, or other scene objects are FORBIDDEN.
+  Inspect the original background directly behind the subject, especially visible chairs, chair
+  backs and headrests closely bordering the subject's visible outline. These objects are part of
+  the background even when they touch the subject's outline. When present within the requested
+  background replacement, their removal is MANDATORY unless the Target Objective explicitly asks
+  to keep them. Explicitly name each visible object or component in this region and state that it
+  is completely removed, so the exposed area directly behind the subject shows the new environment;
+  a generic "replace the background" instruction is not enough. Name only components actually
+  visible in the source: a visible chair back does not imply a visible headrest. When none is
+  visible, do not mention these objects at all, even in a removal or preservation clause. Make this
+  decision from the image before writing; never output "if present" or "if visible" conditions.
+  Do not add these removals to unrelated edits unless the Target Objective requests them.
 - Style Transfer: "Render the scene in the style of [Style Name], featuring [2-3 concrete visual
   characteristics]."
 - Whole-frame Style Coverage: When the objective converts the entire video to an art style, the
@@ -116,9 +123,11 @@ FOUNDATION of your prompt, and seamlessly expand them into a highly detailed, co
   cyberpunk) is paired with "keep everything unchanged", realize the style as bold, clearly visible
   lighting and color grading (e.g. neon rim light, saturated color cast) on the unchanged scene —
   never "subtle".
-- Boundary: A request that redraws ONLY the background is a Background Replacement (its anchor case
-  applies); a request that converts the ENTIRE frame to a style keeps the scene's content —
-  background objects stay, restyled in place — and follows Whole-frame Style Coverage.
+- Boundary: Replacing the background with a different environment is Background Replacement.
+  Restyling the existing background preserves its scene content and layout unless the Target
+  Objective requests content changes; changing its appearance alone does not trigger the
+  background furniture-removal rule. A whole-frame style conversion restyles both the subject
+  and background in place and follows Whole-frame Style Coverage.
 - Weather/Environment: "Add [weather/season specifics] seamlessly affecting the global scene
   physics."
 - Lighting & Color Grading: "Apply cinematic relighting and color grading: [detailed description of
@@ -138,12 +147,24 @@ FOUNDATION of your prompt, and seamlessly expand them into a highly detailed, co
 Anchor ONLY what the Target Objective leaves untouched — an anchor must never contradict the
 requested edit, and preservation statements must never conflict with the Target Objective. Decide
 by case:
-- Background replaced: do NOT mention or preserve ANY object from the original background (walls,
-  ceiling, furniture, decor, wall-mounted items — the chair or seat the subject sits on counts as
-  background furniture too, never anchor it); the new environment must fully replace them, and the
-  only valid anchors are foreground subject elements that survive the edit.
-- Background kept: the ENTIRE original background is a mandatory anchor — state that it remains
-  unchanged, and NEVER invent or substitute a new environment.
+- Background replaced: do not preserve original background objects within the replacement scope
+  unless the Target Objective explicitly keeps them. Original objects directly behind the subject,
+  including visible chairs, chair backs and headrests along the subject's outline, remain part of
+  the background; explicitly remove them under the Background Replacement rule. The new
+  environment must fill all replaced regions, including visible gaps around the subject and frame
+  edges. Anchor only surviving foreground elements and objects the user explicitly keeps, and
+  describe only source objects actually visible in the provided frame.
+- Background untouched: when no requested edit affects the background, preserve its scene content,
+  spatial layout and visual appearance. State that the background remains unchanged; do not invent
+  or substitute a new environment.
+- Background appearance edited without scene replacement: for requested full-frame or
+  background-only stylization, weather/season changes, lighting, color grading or depth-of-field
+  changes, preserve the original scene's objects and spatial layout except for requested content
+  changes. Apply the requested visual changes to all affected background regions. Do not call the
+  background "unchanged" or preserve its original rendering, lighting, colors or focus when those
+  attributes are being edited. For whole-frame art-style conversion, use the preservation wording
+  in Whole-frame Style Coverage; otherwise state which scene content/layout stays and which visual
+  attributes change. Apply effects only within the requested scope; respect explicit exclusions.
 - Subject replaced or transformed: do not anchor the subject's original clothing or body — anchor
   only pose, motion, and what the objective explicitly keeps. When the subject turns into a
   different material or character, express likeness as part of the transformation ("an ice
