@@ -126,7 +126,7 @@ Then install the attention and kernel dependencies:
   git -C deploy/tmp/cutlass checkout dcf215af
   # build only this machine's arch (the default is a 5-arch fat binary —
   # sm_80..120a — which multiplies compile time ~5x); auto-detected:
-  export JOYOMNI_OPS_CUDA_ARCHS=$(python -c "import torch; cc = torch.cuda.get_device_capability(0); print(f'{cc[0]}{cc[1]}a' if cc[0] >= 10 else f'{cc[0]}{cc[1]}')")
+  export JOYOMNI_OPS_CUDA_ARCHS=$(python -c "import torch; cc = torch.cuda.get_device_capability(0); print(f'{cc[0]}{cc[1]}a' if cc[0] >= 9 else f'{cc[0]}{cc[1]}')")
   echo "building joyomni_ops for sm_$JOYOMNI_OPS_CUDA_ARCHS"
   JOYOMNI_OPS_CUTLASS_DIR=$(pwd)/deploy/tmp/cutlass \
     python -m pip install --no-build-isolation ./deploy/joyomni_ops

@@ -9,7 +9,7 @@ Ops provided (no sgl-kernel / sglang dependency):
   - fp8_scaled_mm                : FP8 per-token x per-channel scaled GEMM (cutlass)
 
 GPU arch coverage is chosen from the local nvcc version:
-  - always: sm_80, sm_89, sm_90
+  - always: sm_80, sm_89, sm_90a
   - CUDA >= 12.8: also sm_100a (B200) and sm_120a (RTX PRO 6000 / RTX 5090)
 So building on a CUDA 12.8+ toolchain automatically yields Blackwell support.
 """
@@ -42,7 +42,7 @@ def _cuda_version():
 def _gencodes():
     """-gencode flags. Blackwell (sm_100a/sm_120a) needs nvcc >= 12.8."""
     mj, mn = _cuda_version()
-    # Allow override, e.g. JOYOMNI_OPS_CUDA_ARCHS="90;120a"
+    # Allow override, e.g. JOYOMNI_OPS_CUDA_ARCHS="90a;120a"
     override = os.environ.get("JOYOMNI_OPS_CUDA_ARCHS")
     if override:
         flags = []
@@ -57,7 +57,10 @@ def _gencodes():
     flags = [
         "-gencode=arch=compute_80,code=sm_80",
         "-gencode=arch=compute_89,code=sm_89",
-        "-gencode=arch=compute_90,code=sm_90",
+        # Hopper FP8 GEMM uses arch-conditional WGMMA instructions, requiring
+        # compute_90a/sm_90a. A plain sm_90 build can compile and load, but
+        # launching the Hopper FP8 kernel hits CUTLASS's architecture guard.
+        "-gencode=arch=compute_90a,code=sm_90a",
     ]
     if (mj, mn) >= (12, 8):
         flags += [
@@ -72,7 +75,7 @@ def _gencodes():
         # only — for tuned Blackwell SASS, build on CUDA >= 12.8.
         flags += ["-gencode=arch=compute_90,code=compute_90"]
         print(
-            f"[joyomni_ops] nvcc {mj}.{mn} < 12.8: SASS sm_80/89/90 + sm_90 PTX "
+            f"[joyomni_ops] nvcc {mj}.{mn} < 12.8: SASS sm_80/89/90a + sm_90 PTX "
             f"(JIT fallback for Blackwell). Build on CUDA >= 12.8 for native sm_100a/sm_120a."
         )
     return flags
