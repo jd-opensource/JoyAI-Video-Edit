@@ -352,15 +352,11 @@ class JoyOmniRuntime:
             postprocess_device=postprocess_device_obj,
         )
 
-        try:
-            if os.environ.get("JOYOMNI_SKIP_LOAD_WARMUP", "0").lower() in {"1", "true", "yes", "on"}:
-                print("#####[STREAM] load-time warmup skipped (JOYOMNI_SKIP_LOAD_WARMUP); "
-                      "warm up later on a real GPU")
-            else:
-                for (_wh, _ww) in _orientations:
-                    runtime.warmup_full_pipeline(height=_wh, width=_ww)
-        except Exception as _wexc:
-            print(f"#####[STREAM] full-pipeline warmup error (non-fatal): {_wexc!r}")
+        if os.environ.get("JOYOMNI_SKIP_LOAD_WARMUP", "0").lower() in {"1", "true", "yes", "on"}:
+            print("#####[STREAM] load-time warmup skipped (JOYOMNI_SKIP_LOAD_WARMUP)")
+        else:
+            for (_wh, _ww) in _orientations:
+                runtime.warmup_full_pipeline(height=_wh, width=_ww)
 
         if device_obj.type == "cuda":
             _free_b, _total_b = torch.cuda.mem_get_info(device_obj)
@@ -387,20 +383,6 @@ class JoyOmniRuntime:
             settings=settings or StreamingSettings(),
             ref_image=ref_image,
         )
-
-    def prebake_graph(
-        self,
-        prompt: str,
-        *,
-        settings: StreamingSettings,
-        ref_image: Image.Image | None = None,
-    ) -> None:
-        session = self.create_v2v_session(prompt, settings=settings, ref_image=ref_image)
-        arr = np.zeros((settings.height, settings.width, 3), dtype=np.uint8)
-        try:
-            session._initialize(Image.fromarray(arr, mode="RGB"))
-        finally:
-            session.close()
 
     def warmup_full_pipeline(
         self,
@@ -445,10 +427,7 @@ class JoyOmniRuntime:
             print(f"#####[STREAM] full-pipeline warmup skipped/failed: {exc!r}")
         finally:
             if session is not None:
-                try:
-                    session.close()
-                except Exception:
-                    pass
+                session.close()
 
 class JoyOmniV2VStreamingSession:
     _session_serial_counter = 0
@@ -528,6 +507,7 @@ class JoyOmniV2VStreamingSession:
         self._result_queue: queue.Queue[StreamingChunkResult] | None = None
         self._workers: list[threading.Thread] = []
         self._worker_error: BaseException | None = None
+        self._stop_event = threading.Event()
         self._worker_error_lock = threading.Lock()
         self._pseudo_latent_condition = threading.Condition()
         self._pseudo_latent_chunk_idx: int | None = None
@@ -599,6 +579,8 @@ class JoyOmniV2VStreamingSession:
         self,
         frame: Image.Image,
         frame_meta: dict[str, Any] | None = None,
+        *,
+        drain_results: bool = True,
     ) -> list[StreamingChunkResult]:
         self._raise_worker_error_if_needed()
         frame = self._resize_frame(frame)
@@ -607,20 +589,20 @@ class JoyOmniV2VStreamingSession:
             self._initialize(frame)
         self.pending_frames.append(frame)
         self.pending_metas.append(meta)
-        results: list[StreamingChunkResult] = []
         while len(self.pending_frames) >= self.frames_per_next_chunk:
             n = self.frames_per_next_chunk
             chunk_frames = self.pending_frames[:n]
             chunk_metas = self.pending_metas[:n]
             del self.pending_frames[:n]
             del self.pending_metas[:n]
-            results.extend(self._submit_or_process_chunk(chunk_frames, chunk_metas))
-        results.extend(self._drain_async_results())
+            self._submit_async_chunk(chunk_frames, chunk_metas)
+        results = self._drain_async_results() if drain_results else []
         self._raise_worker_error_if_needed()
         return results
 
     @torch.no_grad()
     def flush_pending(self) -> None:
+        self._raise_worker_error_if_needed()
         if not self.initialized or not self.pending_frames:
             return
         valid = len(self.pending_frames)
@@ -629,18 +611,25 @@ class JoyOmniV2VStreamingSession:
         chunk_metas = self.pending_metas + [self.pending_metas[-1]] * pad
         self.pending_frames = []
         self.pending_metas = []
-        self._submit_or_process_chunk(chunk_frames, chunk_metas, valid_count=valid)
+        self._submit_async_chunk(chunk_frames, chunk_metas, valid_count=valid)
         self._raise_worker_error_if_needed()
 
-    def close(self) -> None:
+    def close(self, timeout: float = 5.0) -> None:
+        self._stop_async_workers(timeout)
+        if torch.cuda.is_available():
+            devices = {str(self.device), str(self.postprocess_device)}
+            devices.update(str(_module_device(vae)) for vae in (
+                self.pipeline.vae, self.decode_vae, self.pseudo_encode_vae,
+            ) if vae is not None)
+            for device in devices:
+                if torch.device(device).type == "cuda":
+                    torch.cuda.synchronize(device)
         self._clear_vae_feature_caches()
         self.pipeline.transformer.reset_inference_kv_cache()
-        self._stop_async_workers()
-        # No empty_cache: keep the freed KV/graph blocks cached in the allocator
-        # so the next session's pools reuse them instead of fresh cudaMallocs.
 
     @torch.no_grad()
     def _initialize(self, first_frame: Image.Image) -> None:
+        self._raise_worker_error_if_needed()
         if self.initialized:
             return
 
@@ -732,8 +721,10 @@ class JoyOmniV2VStreamingSession:
         return np.asarray(frame, dtype=np.float32)
 
     def _update_static_anchor(self, chunk_idx: int, source_frames: list[Image.Image]) -> int | None:
+        if not self.settings.freeze_kv_on_static:
+            return None
         gray = self._chunk_last_frame_gray(source_frames)
-        if not self.settings.freeze_kv_on_static or chunk_idx == 0 or gray is None:
+        if chunk_idx == 0 or gray is None:
             self._prev_static_gray = gray if gray is not None else self._prev_static_gray
             self._static_anchor_id = None
             return None
@@ -763,15 +754,6 @@ class JoyOmniV2VStreamingSession:
 
         self._prev_static_gray = gray
         return anchor_id
-
-    def _submit_or_process_chunk(
-        self,
-        source_frames: list[Image.Image],
-        source_metas: list[dict[str, Any]],
-        valid_count: int | None = None,
-    ) -> list[StreamingChunkResult]:
-        self._submit_async_chunk(source_frames, source_metas, valid_count)
-        return []
 
     def _new_profile(self, chunk_idx: int, input_frames: int) -> dict[str, Any]:
         return {
@@ -973,13 +955,13 @@ class JoyOmniV2VStreamingSession:
         )
 
         total_latent_frames = chunk_idx + 1
-        chunk_windows = self.pipeline._get_chunk_windows(
+        chunk_window = self.pipeline._get_chunk_window(
+            chunk_idx=chunk_idx,
             total_latent_frames=total_latent_frames,
             chunk_size=self.chunk_size,
             window_size=self.local_window_size,
             global_sink_chunk=self.global_sink_chunk,
         )
-        chunk_window = chunk_windows[-1]
         selected_chunk_ids = chunk_window["selected_chunk_ids"]
         history_chunk_ids = selected_chunk_ids[:-1]
         active_chunk_id = selected_chunk_ids[-1]
@@ -1233,16 +1215,35 @@ class JoyOmniV2VStreamingSession:
         for worker in self._workers:
             worker.start()
 
-    def _stop_async_workers(self) -> None:
-        if self._encode_queue is None:
-            return
-        try:
-            self._encode_queue.put(None, timeout=0.1)
-        except queue.Full:
-            if self._worker_error is None:
-                self._encode_queue.put(None)
+    def request_stop(self) -> None:
+        self._stop_event.set()
+        with self._pseudo_latent_condition:
+            self._pseudo_latent_condition.notify_all()
+
+    def _queue_get(self, q):
+        while not self._stop_event.is_set():
+            try:
+                return q.get(timeout=0.05)
+            except queue.Empty:
+                pass
+        return None
+
+    def _queue_put(self, q, item) -> None:
+        while not self._stop_event.is_set():
+            try:
+                q.put(item, timeout=0.05)
+                return
+            except queue.Full:
+                pass
+
+    def _stop_async_workers(self, timeout: float = 5.0) -> None:
+        self.request_stop()
+        deadline = time.monotonic() + timeout
         for worker in self._workers:
-            worker.join()
+            worker.join(timeout=max(0.0, deadline - time.monotonic()))
+        alive = [worker.name for worker in self._workers if worker.is_alive()]
+        if alive:
+            raise TimeoutError(f"streaming workers did not stop: {', '.join(alive)}")
         self._encode_queue = None
         self._dit_queue = None
         self._decode_queue = None
@@ -1252,21 +1253,23 @@ class JoyOmniV2VStreamingSession:
         self._workers = []
 
     def _set_worker_error(self, exc: BaseException) -> None:
+        if self._stop_event.is_set():
+            return
         import traceback as _tb
         print(f"#####[STREAM-WORKER-ERROR] {exc!r}", flush=True)
         _tb.print_exc()
         with self._worker_error_lock:
             if self._worker_error is None:
                 self._worker_error = exc
-        with self._pseudo_latent_condition:
-            self._pseudo_latent_condition.notify_all()
+        self.request_stop()
 
     def _raise_worker_error_if_needed(self) -> None:
         with self._worker_error_lock:
             exc = self._worker_error
-            self._worker_error = None
         if exc is not None:
             raise RuntimeError(f"async streaming worker failed: {exc!r}") from exc
+        if self._stop_event.is_set():
+            raise RuntimeError("streaming session stopped")
 
     @staticmethod
     def _queue_size(q: queue.Queue | None) -> int | None:
@@ -1351,6 +1354,7 @@ class JoyOmniV2VStreamingSession:
         source_metas: list[dict[str, Any]],
         valid_count: int | None = None,
     ) -> None:
+        self._raise_worker_error_if_needed()
         if self._encode_queue is None:
             self._start_async_workers()
         assert self._encode_queue is not None
@@ -1368,13 +1372,8 @@ class JoyOmniV2VStreamingSession:
         )
         self._set_debug_state("submit", "put_encode", chunk_idx)
 
-        while True:
-            self._raise_worker_error_if_needed()
-            try:
-                self._encode_queue.put(job, timeout=1.0)
-                break
-            except queue.Full:
-                continue
+        self._queue_put(self._encode_queue, job)
+        self._raise_worker_error_if_needed()
         self._inc_debug_counter("submitted_chunks")
         self.chunk_idx += 1
 
@@ -1416,10 +1415,9 @@ class JoyOmniV2VStreamingSession:
         while True:
             self._set_debug_state("vae-encode", "wait_encode_queue")
             _q_started = time.perf_counter()
-            job = self._encode_queue.get()
+            job = self._queue_get(self._encode_queue)
             if job is None:
                 self._set_debug_state("vae-encode", "stop")
-                self._dit_queue.put(None)
                 return
             self._record_queue_wait(job.profile, "q_wait_encode_s", _q_started)
             try:
@@ -1438,12 +1436,11 @@ class JoyOmniV2VStreamingSession:
                     ready = _record_ready_event()
                 self._timer_record(job.profile, "reference_prepare_s", started)
                 self._set_debug_state("vae-encode", "put_dit_queue", job.chunk_idx)
-                self._dit_queue.put(_EncodedChunk(job=job, ref_chunk_latent=ref_chunk_latent, ready_event=ready))
+                self._queue_put(self._dit_queue, _EncodedChunk(job=job, ref_chunk_latent=ref_chunk_latent, ready_event=ready))
                 self._inc_debug_counter("encoded_chunks")
             except BaseException as exc:
                 self._set_debug_state("vae-encode", "error", job.chunk_idx)
                 self._set_worker_error(exc)
-                self._dit_queue.put(None)
                 return
 
     def _dit_worker(self) -> None:
@@ -1452,10 +1449,9 @@ class JoyOmniV2VStreamingSession:
         while True:
             self._set_debug_state("dit-denoise", "wait_dit_queue")
             _q_started = time.perf_counter()
-            encoded = self._dit_queue.get()
+            encoded = self._queue_get(self._dit_queue)
             if encoded is None:
                 self._set_debug_state("dit-denoise", "stop")
-                self._decode_queue.put(None)
                 return
             self._record_queue_wait(encoded.job.profile, "q_wait_dit_s", _q_started)
             try:
@@ -1479,14 +1475,13 @@ class JoyOmniV2VStreamingSession:
                         )
                         _dit_ready = _record_ready_event()
                 self._set_debug_state("dit-denoise", "put_decode_queue", encoded.job.chunk_idx)
-                self._decode_queue.put(
+                self._queue_put(self._decode_queue,
                     _DenoisedChunk(job=encoded.job, current_chunk_latents=current_chunk_latents, ready_event=_dit_ready)
                 )
                 self._inc_debug_counter("denoised_chunks")
             except BaseException as exc:
                 self._set_debug_state("dit-denoise", "error", encoded.job.chunk_idx)
                 self._set_worker_error(exc)
-                self._decode_queue.put(None)
                 return
 
     def _decode_worker(self) -> None:
@@ -1496,11 +1491,9 @@ class JoyOmniV2VStreamingSession:
         while True:
             self._set_debug_state("vae-decode", "wait_decode_queue")
             _q_started = time.perf_counter()
-            denoised = self._decode_queue.get()
+            denoised = self._queue_get(self._decode_queue)
             if denoised is None:
                 self._set_debug_state("vae-decode", "stop")
-                self._pseudo_queue.put(None)
-                self._postprocess_queue.put(None)
                 return
             self._record_queue_wait(denoised.job.profile, "q_wait_decode_s", _q_started)
             try:
@@ -1519,19 +1512,17 @@ class JoyOmniV2VStreamingSession:
                     _dec_ready = _record_ready_event()
 
                 self._set_debug_state("vae-decode", "put_pseudo_queue", denoised.job.chunk_idx)
-                self._pseudo_queue.put(
+                self._queue_put(self._pseudo_queue,
                     _DecodedPixelsChunk(job=denoised.job, decoded_pixels=decoded_pixels, ready_event=_dec_ready)
                 )
                 self._set_debug_state("vae-decode", "put_postprocess_queue", denoised.job.chunk_idx)
-                self._postprocess_queue.put(
+                self._queue_put(self._postprocess_queue,
                     _DecodedPixelsChunk(job=denoised.job, decoded_pixels=decoded_pixels, ready_event=_dec_ready)
                 )
                 self._inc_debug_counter("decoded_pixel_chunks")
             except BaseException as exc:
                 self._set_debug_state("vae-decode", "error", denoised.job.chunk_idx)
                 self._set_worker_error(exc)
-                self._pseudo_queue.put(None)
-                self._postprocess_queue.put(None)
                 return
 
     def _pseudo_worker(self) -> None:
@@ -1539,7 +1530,7 @@ class JoyOmniV2VStreamingSession:
         while True:
             self._set_debug_state("pseudo-encode", "wait_pseudo_queue")
             _q_started = time.perf_counter()
-            decoded = self._pseudo_queue.get()
+            decoded = self._queue_get(self._pseudo_queue)
             if decoded is None:
                 self._set_debug_state("pseudo-encode", "stop")
                 return
@@ -1570,7 +1561,7 @@ class JoyOmniV2VStreamingSession:
         while True:
             self._set_debug_state("postprocess", "wait_postprocess_queue")
             _q_started = time.perf_counter()
-            decoded = self._postprocess_queue.get()
+            decoded = self._queue_get(self._postprocess_queue)
             if decoded is None:
                 self._set_debug_state("postprocess", "stop")
                 return
@@ -1600,7 +1591,7 @@ class JoyOmniV2VStreamingSession:
                     n_out,
                 )
                 self._set_debug_state("postprocess", "put_result_queue", decoded.job.chunk_idx)
-                self._result_queue.put(
+                self._queue_put(self._result_queue,
                     StreamingChunkResult(
                         jpegs=packed,
                         profile=decoded.job.profile,
@@ -1830,14 +1821,15 @@ class JoyOmniV2VStreamingSession:
 
     def _next_selected_chunk_ids(self, chunk_idx: int | None = None) -> list[int]:
         chunk_idx = self.chunk_idx if chunk_idx is None else chunk_idx
-        next_total = chunk_idx + 2
-        windows = self.pipeline._get_chunk_windows(
+        next_total = (chunk_idx + 2) * self.chunk_size
+        window = self.pipeline._get_chunk_window(
+            chunk_idx=chunk_idx + 1,
             total_latent_frames=next_total,
             chunk_size=self.chunk_size,
             window_size=self.local_window_size,
             global_sink_chunk=self.global_sink_chunk,
         )
-        return list(windows[-1]["selected_chunk_ids"])
+        return window["selected_chunk_ids"]
 
     def _resize_frame(self, frame: Image.Image) -> Image.Image:
         frame = frame.convert("RGB")

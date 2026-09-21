@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from contextlib import asynccontextmanager
 from fractions import Fraction
 from pathlib import Path
@@ -371,11 +372,12 @@ def _person_present(image: Image.Image, *, onnx_path: str, conf: float) -> bool:
     out = net.forward()
     return float(out[0, 4, :].max()) >= float(conf)
 
-def _enhance_prompt_sync(
+async def _enhance_prompt(
     *,
     raw_prompt: str,
     pe_frame: Image.Image | None,
     pe_model: str | None,
+    timeout: float,
     ref_image: Image.Image | None = None,
 ) -> dict[str, Any]:
     started = time.time()
@@ -388,11 +390,12 @@ def _enhance_prompt_sync(
 
         enhancer = PromptEnhancer(model=pe_model)
         model = enhancer.model or model
-        enhanced = enhancer(
+        enhanced = await enhancer.enhance(
             task_type,
             raw_prompt,
             video=[pe_frame] if pe_frame is not None else None,
             ref_image=ref_image,
+            timeout=timeout,
         )
         if isinstance(enhanced, str) and enhanced.strip():
             enhanced_prompt = enhanced.strip()
@@ -422,11 +425,14 @@ class _SegmentedRecorder:
         segment_seconds: int,
         queue_max: int = 64,
         lossless: bool = False,
+        reliable: bool = False,
     ) -> None:
         self._prefix = prefix
         self._codec = codec
         self._bitrate = int(bitrate)
         self._lossless = bool(lossless)
+        self._reliable = bool(reliable)
+        self._error: BaseException | None = None
         self._segment_ms = max(1, int(segment_seconds)) * 1000
         self._q: "queue.Queue[Any]" = queue.Queue(maxsize=max(1, queue_max))
         self._stop = threading.Event()
@@ -444,18 +450,27 @@ class _SegmentedRecorder:
         self._started = True
 
     def submit(self, item: Any, t_capture_ms: float) -> None:
-        if not self._started or self._stop.is_set():
-            return
-        try:
-            self._q.put_nowait((item, float(t_capture_ms)))
-        except queue.Full:
-            self.frames_dropped_recording += 1
+        deadline = time.monotonic() + 20.0
+        while True:
+            self._raise_error()
+            if not self._started or self._stop.is_set():
+                raise RuntimeError("recorder is not accepting frames")
+            try:
+                self._q.put((item, float(t_capture_ms)), timeout=0.05 if self._reliable else 0)
+                return
+            except queue.Full:
+                if not self._reliable:
+                    self.frames_dropped_recording += 1
+                    return
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("recording queue remained full")
+
+    def _raise_error(self) -> None:
+        if self._error is not None:
+            raise RuntimeError(f"recording failed: {self._error!r}") from self._error
 
     def stop(self, timeout: float = 5.0) -> None:
         if not self._started:
-            return
-        if self._stop.is_set():
-            self._thread.join(timeout=timeout)
             return
         self._stop.set()
         try:
@@ -463,6 +478,9 @@ class _SegmentedRecorder:
         except queue.Full:
             pass
         self._thread.join(timeout=timeout)
+        if self._thread.is_alive():
+            raise TimeoutError("recorder did not finish encoding")
+        self._raise_error()
 
     def _to_image(self, item: Any) -> "Image.Image | None":
         if isinstance(item, Image.Image):
@@ -515,23 +533,16 @@ class _SegmentedRecorder:
         try:
             for packet in stream.encode():
                 output.mux(packet)
-        except Exception:
-            pass
-        try:
+        finally:
             output.close()
-        except Exception:
-            pass
 
     def _run(self) -> None:
-        try:
-            import av
-        except Exception:
-            return
         output = stream = None
         time_base = Fraction(1, 1000)
         seg_t0 = 0.0
         last_pts = -1
         try:
+            import av
             while True:
                 try:
                     got = self._q.get(timeout=0.2)
@@ -544,7 +555,7 @@ class _SegmentedRecorder:
                 item, t_capture_ms = got
                 image = self._to_image(item)
                 if image is None:
-                    continue
+                    raise ValueError("invalid recording frame")
                 if self._width is None:
                     self._width, self._height = int(image.width), int(image.height)
                 if output is None:
@@ -554,21 +565,24 @@ class _SegmentedRecorder:
                 pts = round(t_capture_ms - seg_t0)
                 if pts <= last_pts:
                     pts = last_pts + 1
-                try:
-                    frame = av.VideoFrame.from_image(image).reformat(format="yuv420p")
-                    frame.pts = pts
-                    frame.time_base = time_base
-                    for packet in stream.encode(frame):
-                        output.mux(packet)
-                    self.frames_written += 1
-                    last_pts = pts
-                except Exception:
-                    pass
+                frame = av.VideoFrame.from_image(image).reformat(format="yuv420p")
+                frame.pts = pts
+                frame.time_base = time_base
+                for packet in stream.encode(frame):
+                    output.mux(packet)
+                self.frames_written += 1
+                last_pts = pts
                 if pts >= self._segment_ms:
-                    self._close_segment(output, stream)
+                    previous_output, previous_stream = output, stream
                     output = stream = None
+                    self._close_segment(previous_output, previous_stream)
+        except BaseException as exc:
+            self._error = exc
         finally:
-            self._close_segment(output, stream)
+            try:
+                self._close_segment(output, stream)
+            except BaseException as exc:
+                self._error = exc
 
 def _optional_positive_int(value: Any, *, name: str) -> int | None:
     if value is None or value == "":
@@ -632,6 +646,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
     app.state.runtime_lock = threading.Lock()
     app.state.inference_lock = threading.Lock()
     app.state.active_session = None
+    app.state.runtime_error = None
     app.state.ws_debug = {}
 
     app.state.session_gate = SessionGate()
@@ -666,7 +681,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
     def health() -> JSONResponse:
         return JSONResponse(
             {
-                "ok": True,
+                "ok": app.state.runtime_error is None,
+                "error": app.state.runtime_error,
                 "runtime_loaded": app.state.runtime is not None,
                 "dit_ckpt": args.dit_ckpt,
                 "device": str(app.state.runtime.device) if app.state.runtime is not None else args.device,
@@ -785,6 +801,12 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         ticket = None
         frames_in = 0
         frames_out = 0
+        session_id = None
+        edit_frames = 0
+        completed_frames = 0
+        pending_work: set[asyncio.Task] = set()
+        pe_report = None
+        raw_session_prompt = args.prompt
         session_prompt = args.prompt
         session_settings: StreamingSettings | None = None
         ref_image: Image.Image | None = None
@@ -821,7 +843,6 @@ def create_app(args: argparse.Namespace) -> FastAPI:
 
         rec_input: _SegmentedRecorder | None = None
         rec_output: _SegmentedRecorder | None = None
-        rec_seq = 0
         rec_base: Path | None = None
         lossless_mode = False
         ws_debug: dict[str, Any] = {
@@ -844,7 +865,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
 
         async def _ws_send_json(payload: dict[str, Any]) -> None:
             try:
-                await asyncio.wait_for(websocket.send_json(payload), timeout=WS_SEND_TIMEOUT_S)
+                await asyncio.wait_for(websocket.send_json({**payload, "session_id": session_id}), timeout=WS_SEND_TIMEOUT_S)
             except asyncio.TimeoutError:
                 raise WebSocketDisconnect()
 
@@ -871,7 +892,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             if not encoded_frames:
                 return 0
 
-            if gate_state.get("absent_hold"):
+            if not lossless_mode and gate_state.get("absent_hold"):
                 return 0
             count = len(encoded_frames)
             if not source_metas:
@@ -991,7 +1012,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     ws_debug["frames_out"] = frames_out
                     _rec_o = rec_output
                     if _rec_o is not None:
-                        _rec_o.submit(encoded, source_meta.get("t_capture_ms"))
+                        await asyncio.to_thread(_rec_o.submit, encoded, source_meta.get("t_capture_ms"))
                         ws_debug["rec_out_written"] = _rec_o.frames_written
                         ws_debug["rec_out_dropped"] = _rec_o.frames_dropped_recording
                     continue
@@ -1069,49 +1090,28 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 )
             return count
 
-        async def _send_chunk_result(
-            result,
-            *,
-            fallback_meta: dict[str, Any] | None = None,
-            fallback_elapsed: float = 0.0,
-        ) -> int:
-            if not result.jpegs:
-                return 0
+        async def _send_chunk_result(result) -> int:
             jpegs = result.jpegs
-            if result.source_metas:
-                source_metas = result.source_metas
-            elif fallback_meta is not None:
-                source_metas = [fallback_meta] * len(jpegs)
-            else:
-                source_metas = [{} for _ in jpegs]
+            source_metas = result.source_metas or [{} for _ in jpegs]
             if result.valid_count is not None:
                 jpegs = jpegs[: result.valid_count]
                 source_metas = source_metas[: result.valid_count]
-            server_elapsed = float(result.elapsed or fallback_elapsed)
             return await _send_encoded_frames(
-                jpegs, source_metas, result.profile, server_elapsed,
+                jpegs, source_metas, result.profile, float(result.elapsed or 0.0),
             )
 
         async def _output_pump(session_ref) -> None:
+            nonlocal completed_frames
             while not stop_output_pump.is_set():
-                try:
-                    result = await asyncio.to_thread(session_ref.wait_async_result, 0.05)
-                except Exception as exc:
-                    await _send_json({"type": "error", "message": repr(exc)})
-                    break
+                result = await asyncio.to_thread(session_ref.wait_async_result, 0.05)
                 if result is None:
                     continue
-                if result.jpegs:
-                    jpegs = result.jpegs
-                    source_metas = result.source_metas or [{} for _ in jpegs]
-                    if result.valid_count is not None:
-                        jpegs = jpegs[: result.valid_count]
-                        source_metas = source_metas[: result.valid_count]
-                    await _send_encoded_frames(
-                        jpegs, source_metas, result.profile, float(result.elapsed or 0.0)
-                    )
+                await _send_chunk_result(result)
+                completed_frames += min(len(result.jpegs), result.valid_count) if result.valid_count is not None else len(result.jpegs)
 
         def _create_session():
+            if app.state.runtime_error:
+                raise RuntimeError(app.state.runtime_error)
             if session_settings is None:
                 raise RuntimeError("streaming settings are not initialized")
             return runtime.create_v2v_session(
@@ -1120,65 +1120,37 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 ref_image=ref_image,
             )
 
-        def _session_health_error(session_ref) -> str | None:
-            if session_ref is None:
-                return None
+        async def _run_work(func, *, timeout=None):
+            task = asyncio.create_task(asyncio.to_thread(func))
+            pending_work.add(task)
             try:
-                snapshot = session_ref.debug_snapshot()
-            except Exception:
-                return None
-
-            workers = snapshot.get("workers") or {}
-            errored = []
-            dead = []
-            for name, info in workers.items():
-                state = info.get("state") or {}
-                state_name = state.get("state")
-                if state_name == "error":
-                    errored.append(f"{name}@chunk={state.get('chunk_idx')}")
-                if info.get("alive") is False:
-                    dead.append(f"{name}:{state_name or 'unknown'}")
-            if errored:
-                return "streaming pipeline worker error: " + ", ".join(errored)
-
-            queues = snapshot.get("queues") or {}
-            queue_maxsize = snapshot.get("queue_maxsize") or {}
-            encode_depth = queues.get("encode")
-            encode_max = queue_maxsize.get("encode")
-            encode_full = (
-                isinstance(encode_depth, int) and
-                isinstance(encode_max, int) and
-                encode_max > 0 and
-                encode_depth >= encode_max
-            )
-            if encode_full and dead:
-                return (
-                    f"streaming pipeline stuck: encode queue full "
-                    f"({encode_depth}/{encode_max}) and workers not alive: " +
-                    ", ".join(dead)
-                )
-            return None
-
-        def _close_session_sync(session_ref) -> None:
-            with app.state.inference_lock:
-                session_ref.close()
+                return await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+            finally:
+                if task.done():
+                    pending_work.discard(task)
 
         async def _close_session_safely(session_ref, reason: str) -> None:
+            if app.state.runtime_error:
+                return
+            session_ref.request_stop()
+            deadline = time.monotonic() + max(0.1, float(args.session_close_timeout_s))
             try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(_close_session_sync, session_ref),
-                    timeout=max(0.1, float(args.session_close_timeout_s)),
-                )
-            except asyncio.TimeoutError:
-                ws_debug["close_timeout"] = reason
-                print(
-                    f"#####[WS-GUARD] session close timed out after "
-                    f"{args.session_close_timeout_s:.1f}s reason={reason}",
-                    flush=True,
-                )
+                if pending_work:
+                    done, waiting = await asyncio.wait(pending_work, timeout=max(0.0, deadline - time.monotonic()))
+                    for task in done:
+                        if not task.cancelled():
+                            task.exception()
+                    pending_work.difference_update(done)
+                    if waiting:
+                        raise TimeoutError("session operations have not stopped")
+                remaining = max(0.01, deadline - time.monotonic())
+                await _run_work(lambda: session_ref.close(timeout=remaining), timeout=remaining)
             except Exception as exc:
                 ws_debug["close_error"] = repr(exc)
-                print(f"#####[WS-GUARD] session close failed reason={reason}: {exc!r}", flush=True)
+                app.state.runtime_error = f"Unsafe runtime after {reason}: {exc!r}; restart required"
+                for task in pending_work:
+                    task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+                raise RuntimeError(app.state.runtime_error) from exc
 
         async def _stop_output_task() -> None:
             nonlocal output_task
@@ -1188,23 +1160,24 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     await asyncio.wait_for(output_task, timeout=1.0)
                 except asyncio.TimeoutError:
                     output_task.cancel()
+                    await asyncio.gather(output_task, return_exceptions=True)
                 except Exception:
                     pass
             output_task = None
 
         def _start_recorders() -> None:
-            nonlocal rec_input, rec_output, rec_seq, rec_base
+            nonlocal rec_input, rec_output, rec_base
             if args.record_dir is None:
                 return
             _stop_recorders()
             try:
-                rec_seq += 1
-                base = Path(args.record_dir) / f"{int(time.time())}_{rec_seq}"
-                base.mkdir(parents=True, exist_ok=True)
+                base = Path(args.record_dir) / f"{int(time.time())}_{uuid.uuid4().int}"
+                base.mkdir(parents=True)
                 common = dict(
                     codec=str(args.record_codec),
                     bitrate=int(args.record_bitrate),
                     segment_seconds=int(args.record_segment_seconds),
+                    reliable=lossless_mode,
                 )
                 rec_input = _SegmentedRecorder(prefix=base / "input", **common)
                 rec_output = _SegmentedRecorder(prefix=base / "output", lossless=lossless_mode, **common)
@@ -1223,21 +1196,25 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             except Exception as exc:
                 ws_debug["rec_error"] = repr(exc)
                 print(f"#####[REC] start failed: {exc!r} -> recording OFF", flush=True)
-                rec_input = None
-                rec_output = None
-                rec_base = None
+                _stop_recorders()
+                if lossless_mode:
+                    raise
 
         def _stop_recorders() -> None:
             nonlocal rec_input, rec_output, rec_base
+            error = None
             for _rec in (rec_input, rec_output):
                 if _rec is not None:
                     try:
-                        _rec.stop()
+                        _rec.stop(timeout=20.0 if lossless_mode else 5.0)
                     except Exception as exc:
                         ws_debug["rec_error"] = f"stop: {exc!r}"
+                        error = exc
             rec_input = None
             rec_output = None
             rec_base = None
+            if error is not None:
+                raise error
 
         def _write_prompt_sidecar() -> None:
             if rec_base is None:
@@ -1261,7 +1238,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 pe_task.cancel()
                 try:
                     await pe_task
-                except BaseException:
+                except asyncio.CancelledError:
                     pass
                 pe_task = None
 
@@ -1271,19 +1248,37 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 stop_output_pump.clear()
                 output_task = asyncio.create_task(_output_pump(session_ref))
 
+        def _check_output() -> None:
+            if output_task is not None and output_task.done():
+                output_task.result()
+                raise RuntimeError("output processing stopped before completion")
+            session._raise_worker_error_if_needed()
+
+        async def _drain_session() -> None:
+            await _run_work(session.flush_pending, timeout=max(0.1, float(args.push_frame_timeout_s)))
+            deadline = time.monotonic() + 20.0
+            while completed_frames < edit_frames:
+                _check_output()
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"incomplete output: {completed_frames}/{edit_frames} frames")
+                await asyncio.sleep(0.01)
+            _check_output()
 
         async def _reset_session(reason: str) -> None:
-            nonlocal session, frames_since_session_reset, reset_count
+            nonlocal session, frames_since_session_reset, reset_count, edit_frames, completed_frames
             if session is None:
                 return
             print(f"#####[STREAM] session reset ({reason})", flush=True)
 
+            if lossless_mode:
+                await _drain_session()
             await _stop_output_task()
             await _close_session_safely(session, "kv_reset")
             reset_count += 1
             session = _create_session()
             app.state.active_session = session
             frames_since_session_reset = 0
+            edit_frames = completed_frames = 0
             ws_debug["kv_reset_count"] = reset_count
             ws_debug["frames_since_session_reset"] = frames_since_session_reset
             await _send_json(
@@ -1319,6 +1314,10 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             last_activity = time.monotonic()
             last_frames_out = frames_out
             while True:
+                if app.state.runtime_error:
+                    raise RuntimeError(app.state.runtime_error)
+                if output_task is not None and output_task.done():
+                    output_task.result()
                 if frames_out != last_frames_out or pe_task is not None:
                     last_frames_out = frames_out
                     last_activity = time.monotonic()
@@ -1340,6 +1339,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 if "text" in message and message["text"] is not None:
                     payload = json.loads(message["text"])
                     msg_type = payload.get("type")
+                    if msg_type != "start" and payload.get("session_id", session_id) != session_id:
+                        continue
                     if msg_type == "start":
                         print(f"#####[RESTART] 'start' received (session {'live' if session is not None else 'none'})", flush=True)
                         last_activity = time.monotonic()
@@ -1354,6 +1355,11 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                 app.state.active_session = None
                             session = None
 
+                        session_id = str(payload.get("session_id") or uuid.uuid4().hex)
+                        frames_in = frames_out = edit_frames = completed_frames = last_frames_out = 0
+                        next_frame_meta = None
+                        ws_debug.update(frames_in=0, frames_out=0, output_bytes=0, chunk_results_sent=0,
+                                        frames_dropped_backpressure=0, session_id=session_id)
                         raw_session_prompt = str(payload.get("prompt", args.prompt))
                         session_prompt = raw_session_prompt
                         try:
@@ -1384,7 +1390,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             continue
 
                         freeze_kv_on_static = bool(
-                            payload.get("freeze_kv_on_static", args.freeze_kv_on_static)
+                            payload.get("freeze_kv_on_static", False if lossless_mode else args.freeze_kv_on_static)
                         )
                         static_diff_thresh = float(
                             payload.get("static_diff_thresh", args.static_diff_thresh)
@@ -1394,7 +1400,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         ))
                         use_pe = bool(payload.get("use_pe", args.use_pe)) and bool(os.environ.get("OPENAI_API_KEY"))
 
-                        entry_gate = bool(payload.get("gate_enabled", True))
+                        entry_gate = bool(payload.get("gate_enabled", True)) and not lossless_mode
                         face_gate_pending = entry_gate
                         flow["recv"] = None
                         flow["at"] = 0.0
@@ -1403,6 +1409,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         flow["clamped"] = False
                         flow["consec"] = 0
                         flow["base"] = frames_out
+                        flow.update(has_ack=False, dropped=0, skew_min=None, skew_at=0.0, up_ms=0.0)
 
                         gate_on = bool(args.online_gate) and entry_gate
 
@@ -1508,25 +1515,20 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                 "ref_image": ref_image is not None,
                                 "kv_reset_frames": kv_reset_frames,
                                 "use_pe": use_pe,
+                                "pe_deferred": pe_defer,
                                 "pe_model": args.pe_model or DEFAULT_PE_MODEL,
                                 "max_temporal_ids": max_temporal_ids,
                                 "freeze_kv_on_static": freeze_kv_on_static,
                                 "static_diff_thresh": static_diff_thresh,
                             }
                         )
-                        _start_recorders()
+                        await asyncio.to_thread(_start_recorders)
                         _start_output_task(session)
-                        if not pe_defer:
-                            def _prebake(_p=session_prompt, _s=session_settings, _r=ref_image):
-                                with app.state.inference_lock:
-                                    runtime.prebake_graph(_p, settings=_s, ref_image=_r)
-                            asyncio.create_task(asyncio.to_thread(_prebake))
                     elif msg_type == "stop":
                         ws_debug["last_message_type"] = "stop"
 
                         await _cancel_pe()
                         await _stop_output_task()
-                        await asyncio.to_thread(_stop_recorders)
                         break
                     elif msg_type == "finalize_recording":
                         ws_debug["last_message_type"] = "finalize_recording"
@@ -1535,15 +1537,18 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                               "message": "Recording is not enabled (--record-dir is unset)."})
                             continue
 
-                        if session is not None:
-                            await asyncio.to_thread(session.flush_pending)
-                            _flush_deadline = time.monotonic() + 20.0
-                            while frames_out < frames_in and time.monotonic() < _flush_deadline:
-                                await asyncio.sleep(0.05)
+                        try:
+                            if pe_task is not None:
+                                await pe_task
+                            if session is not None:
+                                await _drain_session()
+                            await _stop_output_task()
+                            finalized = rec_base
+                            await asyncio.to_thread(_stop_recorders)
+                        except Exception as exc:
+                            await _send_json({"type": "recording_finalized", "ok": False, "message": str(exc)})
+                            break
                         last_activity = time.monotonic()
-                        await _stop_output_task()
-                        finalized = rec_base
-                        await asyncio.to_thread(_stop_recorders)
                         await _send_json({
                             "type": "recording_finalized",
                             "ok": finalized is not None,
@@ -1618,6 +1623,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     continue
 
                 if "bytes" not in message or message["bytes"] is None:
+                    if message.get("type") == "websocket.disconnect":
+                        break
                     continue
                 if session is None:
                     await _send_json({"type": "error", "message": "send start JSON before frames"})
@@ -1672,11 +1679,11 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     if pe_report and pe_report.get("enhanced_prompt"):
                         session_prompt = pe_report["enhanced_prompt"]
                     await _reset_session("kv_reset_frames")
-                    continue
 
                 _prof_on = session_settings is not None and session_settings.profile_timings
 
                 def _run_frame():
+                    nonlocal edit_frames
                     if uplink_frame is not None:
                         frame = uplink_frame
                     elif _prof_on:
@@ -1830,9 +1837,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         gate_state["pe_anchor"] = frame
                         return "__gate_pe__"
 
-                    health_error = _session_health_error(session)
-                    if health_error:
-                        raise RuntimeError(health_error)
+                    session._raise_worker_error_if_needed()
 
                     acquired = app.state.inference_lock.acquire(
                         timeout=max(0.1, float(args.inference_lock_timeout_s))
@@ -1842,29 +1847,32 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             f"inference lock timeout after {args.inference_lock_timeout_s:.1f}s"
                         )
                     try:
-                        health_error = _session_health_error(session)
-                        if health_error:
-                            raise RuntimeError(health_error)
-
-                        if session_max_inflight and session.inflight_chunks() >= session_max_inflight:
+                        if not lossless_mode and session_max_inflight and session.inflight_chunks() >= session_max_inflight:
                             ws_debug["frames_dropped_backpressure"] = (
                                 int(ws_debug.get("frames_dropped_backpressure", 0)) + 1
                             )
-                            return session._drain_async_results()
+                            return []
 
                         _rec_i = rec_input
                         if _rec_i is not None:
                             _rec_i.submit(frame, frame_meta.get("t_capture_ms"))
                             ws_debug["rec_in_written"] = _rec_i.frames_written
                             ws_debug["rec_in_dropped"] = _rec_i.frames_dropped_recording
-                        return session.push_frame(frame, frame_meta=frame_meta)
+                        session.push_frame(frame, frame_meta=frame_meta, drain_results=False)
+                        edit_frames += 1
+                        return []
                     finally:
                         app.state.inference_lock.release()
 
-                started = time.time()
                 try:
-                    chunk_results = await asyncio.wait_for(
-                        asyncio.to_thread(_run_frame),
+                    capacity_deadline = time.monotonic() + max(0.1, float(args.push_frame_timeout_s))
+                    while lossless_mode and session_max_inflight and session.inflight_chunks() >= session_max_inflight:
+                        _check_output()
+                        if time.monotonic() >= capacity_deadline:
+                            raise TimeoutError("file input timed out waiting for inference capacity")
+                        await asyncio.sleep(0.01)
+                    chunk_results = await _run_work(
+                        _run_frame,
                         timeout=max(0.1, float(args.push_frame_timeout_s)),
                     )
                 except asyncio.TimeoutError:
@@ -1906,13 +1914,10 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         async def _run_pe(_sess=session, _anchor=anchor, _raw=raw_session_prompt, _ref=ref_image):
                             nonlocal pe_defer, pe_report, pe_task
                             try:
-                                report = await asyncio.wait_for(
-                                    asyncio.to_thread(
-                                        _enhance_prompt_sync,
-                                        raw_prompt=_raw,
-                                        pe_frame=_anchor, pe_model=args.pe_model,
-                                        ref_image=_ref,
-                                    ),
+                                report = await _enhance_prompt(
+                                    raw_prompt=_raw,
+                                    pe_frame=_anchor, pe_model=args.pe_model,
+                                    ref_image=_ref,
                                     timeout=max(1.0, float(args.pe_timeout_s)),
                                 )
                                 txt = str(report.get("enhanced_prompt") or _raw)
@@ -1921,18 +1926,13 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                     with app.state.inference_lock:
                                         _sess.prompt = txt
                                         _sess._initialize(_anchor)
-                                await asyncio.to_thread(_swap)
+                                await _run_work(_swap, timeout=max(0.1, float(args.push_frame_timeout_s)))
                                 pe_report = report
                                 ws_debug["pe_report"] = report
                                 await _send_json({"type": "prompt_enhanced", **report})
-                            except Exception:
-                                def _swap_raw():
-                                    with app.state.inference_lock:
-                                        _sess._initialize(_anchor)
-                                await asyncio.to_thread(_swap_raw)
-                                await _send_json({"type": "prompt_enhanced", "enabled": True,
-                                                  "raw_prompt": _raw, "enhanced_prompt": _raw,
-                                                  "fallback": True, "error": True, "elapsed_s": 0.0})
+                            except Exception as exc:
+                                _sess.request_stop()
+                                await _send_json({"type": "error", "message": str(exc)})
                             finally:
                                 pe_defer = False
                                 pe_task = None
@@ -1957,44 +1957,21 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         session_prompt = pe_report["enhanced_prompt"]
                     await _reset_session("person_count_changed")
                     continue
-                elapsed = time.time() - started
-                if not chunk_results:
-                    await _send_json(
-                        {
-                            "type": "accepted",
-                            "frames_in": frames_in,
-                            "frames_out": frames_out,
-                            "next_chunk_needs": session.frames_per_next_chunk - len(session.pending_frames),
-                        }
-                    )
-                    continue
-
-                last_count = 0
-                for result in chunk_results:
-                    last_count = await _send_chunk_result(
-                        result,
-                        fallback_meta=frame_meta,
-                        fallback_elapsed=elapsed,
-                    )
-                if last_count == 0:
-                    await _send_json(
-                        {
-                            "type": "accepted",
-                            "frames_in": frames_in,
-                            "frames_out": frames_out,
-                            "next_chunk_needs": session.frames_per_next_chunk - len(session.pending_frames),
-                        }
-                    )
+                await _send_json({
+                    "type": "accepted", "frames_in": frames_in, "frames_out": frames_out,
+                    "next_chunk_needs": session.frames_per_next_chunk - len(session.pending_frames),
+                })
         except WebSocketDisconnect:
             pass
-        except RuntimeError as exc:
-            if "disconnect" not in str(exc).lower():
-                raise
+        except Exception as exc:
+            try:
+                await _send_json({"type": "error", "message": str(exc)})
+            except (WebSocketDisconnect, RuntimeError):
+                pass
         finally:
             try:
                 await _cancel_pe()
                 await _stop_output_task()
-                await asyncio.to_thread(_stop_recorders)
                 if session is not None:
                     await _close_session_safely(session, "finally")
                 if getattr(app.state, "active_session", None) is session:
@@ -2002,6 +1979,10 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 ws_debug["closed_at"] = time.time()
                 ws_debug["send_state"] = "closed"
             finally:
+                try:
+                    await asyncio.to_thread(_stop_recorders)
+                except Exception as exc:
+                    ws_debug["rec_error"] = repr(exc)
                 if ticket is not None:
                     app.state.session_gate.release(ticket)
 
@@ -2059,13 +2040,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prompt", type=str, default="Keep the person and scene temporally consistent while applying the requested edit.")
     parser.add_argument("--profile-timings", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--kv-reset-frames", type=int, default=600)
-    parser.add_argument("--max-temporal-ids", type=int, default=None)
+    parser.add_argument("--max-temporal-ids", type=int, default=8)
     parser.add_argument("--freeze-kv-on-static", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--static-diff-thresh", type=float, default=0.5)
     parser.add_argument("--preload", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--push-frame-timeout-s", type=float, default=15.0, help="Max seconds a single frame submission may block before releasing the WS session gate.")
-    parser.add_argument("--max-inflight-chunks", type=int, default=2, help="Drop incoming frames while this many chunks are already in the pipeline (latency governor; pins display latency to ~N chunk periods). 2 keeps glass-to-glass latency low (~1 chunk) and prevents the session-start init stall from building a frame backlog (the 'ramp-up'); higher values buffer more (smoother under hiccups) at the cost of latency and a startup ramp. 0 disables. Overridable per session via the start payload's max_inflight_chunks.")
-    parser.add_argument("--session-close-timeout-s", type=float, default=5.0, help="Best-effort session cleanup timeout during WS teardown.")
+    parser.add_argument("--push-frame-timeout-s", type=float, default=15.0, help="Timeout for frame submission or file-input backpressure; teardown must finish before model reuse.")
+    parser.add_argument("--max-inflight-chunks", type=int, default=2, help="Limit chunks in flight: camera input drops excess frames, file input waits for capacity. 0 disables; overridable per session.")
+    parser.add_argument("--session-close-timeout-s", type=float, default=5.0, help="Session cleanup timeout. If workers or GPU work remain active, reject new sessions until restart.")
     parser.add_argument("--inference-lock-timeout-s", type=float, default=5.0, help="Max seconds to wait for the process-wide inference lock.")
 
     parser.add_argument("--record-dir", type=str, default=None, help="Directory to record input/output mp4s into (per-session subfolder). Off if unset.")

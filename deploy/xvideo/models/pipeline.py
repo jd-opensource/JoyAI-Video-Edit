@@ -314,38 +314,39 @@ class Pipeline(DiffusionPipeline):
             return Pipeline._KV_CACHE_ID_REF_IMAGE
         raise ValueError(f"Unsupported cache kind: {kind!r}")
 
-    @staticmethod
+    @classmethod
     def _get_chunk_windows(
+        cls,
         total_latent_frames: int,
         chunk_size: int,
         window_size: int,
         global_sink_chunk: bool,
     ) -> List[Dict[str, Any]]:
+        num_chunks = (total_latent_frames + chunk_size - 1) // chunk_size
+        return [cls._get_chunk_window(i, total_latent_frames, chunk_size, window_size, global_sink_chunk)
+                for i in range(num_chunks)]
+
+    @staticmethod
+    def _get_chunk_window(
+        chunk_idx: int,
+        total_latent_frames: int,
+        chunk_size: int,
+        window_size: int,
+        global_sink_chunk: bool,
+    ) -> Dict[str, Any]:
         if window_size <= 0:
             raise ValueError(f"`window_size` must be positive, got {window_size}.")
-
-        windows = []
-        num_chunks = (total_latent_frames + chunk_size - 1) // chunk_size
-        for chunk_idx in range(num_chunks):
-            chunk_start = chunk_idx * chunk_size
-            chunk_end = min(total_latent_frames, chunk_start + chunk_size)
-            if global_sink_chunk and chunk_idx > 0:
-                tail_window_size = max(window_size - 1, 1)
-                tail_chunk_start = max(1, chunk_idx - tail_window_size + 1)
-                selected_chunk_ids = [0] + list(range(tail_chunk_start, chunk_idx + 1))
-            else:
-                window_chunk_start = max(0, chunk_idx - window_size + 1)
-                selected_chunk_ids = list(range(window_chunk_start, chunk_idx + 1))
-
-            windows.append(
-                {
-                    "chunk_idx": chunk_idx,
-                    "chunk_start": chunk_start,
-                    "chunk_end": chunk_end,
-                    "selected_chunk_ids": selected_chunk_ids,
-                }
-            )
-        return windows
+        if global_sink_chunk and chunk_idx > 0:
+            tail_start = max(1, chunk_idx - max(window_size - 1, 1) + 1)
+            selected_chunk_ids = [0] + list(range(tail_start, chunk_idx + 1))
+        else:
+            selected_chunk_ids = list(range(max(0, chunk_idx - window_size + 1), chunk_idx + 1))
+        return {
+            "chunk_idx": chunk_idx,
+            "chunk_start": chunk_idx * chunk_size,
+            "chunk_end": min(total_latent_frames, (chunk_idx + 1) * chunk_size),
+            "selected_chunk_ids": selected_chunk_ids,
+        }
 
     @staticmethod
     def _chunk_frame_bounds(chunk_id: int, chunk_size: int, total_latent_frames: int) -> Tuple[int, int]:

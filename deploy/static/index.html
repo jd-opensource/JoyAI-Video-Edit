@@ -380,6 +380,8 @@ const I18N = {
     gate_settling: "保持不动，正在对焦",
     gate_no_face_wait: "没有检测到人脸，请正对摄像头 😊",
     toast_done: "✨ 编辑完成，点右下角气泡下载",
+    download_retry: "重试下载",
+    download_failed: "下载失败：",
     toast_finalizing: "✨ 编辑完成，正在生成可下载视频",
     edit_processing: "✨ 正在编辑",
     q_downgrade_auto: " · 已自动降到低画质", q_downgrade_hint: " · 建议降低画质",
@@ -440,6 +442,8 @@ const I18N = {
     gate_settling: "Hold still, focusing",
     gate_no_face_wait: "No face detected, please face the camera 😊",
     toast_done: "✨ Done — click the bubble at bottom-right to download",
+    download_retry: "Retry download",
+    download_failed: "Download failed: ",
     toast_finalizing: "✨ Done — generating the downloadable video",
     edit_processing: "✨ Editing",
     q_downgrade_auto: " · auto-lowered to low quality", q_downgrade_hint: " · consider lowering quality",
@@ -642,6 +646,8 @@ let tickInFlight = false;
 let pePausedSend = false;
 let peDeferThisSend = false;
 let videoPullActive = false;
+let videoPullGeneration = 0;
+let videoPullTimer = null;
 let videoPullIdx = 0;
 const videoPullFps = 24;
 let videoPullTotal = 0;
@@ -658,6 +664,8 @@ function stopRecordDrain() {
 let startingRun = false;
 let sessionGranted = false;
 let peCache = null;
+let sourceRevision = 0;
+let activeSessionId = null;
 let pendingPeCacheKey = null;
 let outputPlaybackTimer = null;
 let outputPlaybackIntervalMs = null;
@@ -687,10 +695,8 @@ let lastObjectUrl = null;
 let alignMaxAgeMs = 0;
 let lastShownCaptureMs = 0;
 let pendingRevokeUrl = null;
-let lastSourceObjectUrl = null;
 let refImagePreviewDataUrl = null;
 let injectedRefImageDataUrl = null;
-let suppressPeThisSend = false;
 let outputWaitingFace = false;
 let waitHintReason = null;
 let waitHintAt = 0;
@@ -744,6 +750,7 @@ function backendPendingFrames() {
 }
 
 function noteBackendAck(msg) {
+  if (msg && msg.session_id && msg.session_id !== activeSessionId) return;
   const framesIn = Number(msg && msg.frames_in);
   if (Number.isFinite(framesIn)) {
     backendAckedFrames = Math.max(backendAckedFrames, framesIn);
@@ -778,6 +785,7 @@ function orientDims(o) {
   return o === "portrait" ? { width: short, height: long } : { width: long, height: short };
 }
 function applyOrientation(o) {
+  invalidatePeSource();
   const dims = orientDims(o);
   document.getElementById("width").value = dims.width;
   document.getElementById("height").value = dims.height;
@@ -798,7 +806,14 @@ function maxTemporalIdsValue() {
 }
 
 function peCacheKey(rawPrompt, refImage) {
-  return JSON.stringify({ prompt: rawPrompt || "", refImage: refImage || "" });
+  return JSON.stringify({ prompt: rawPrompt || "", refImage: refImage || "", sourceRevision,
+    width: document.getElementById("width").value, height: document.getElementById("height").value });
+}
+
+function invalidatePeSource() {
+  sourceRevision += 1;
+  peCache = null;
+  pendingPeCacheKey = null;
 }
 
 function startFrameTimer() {
@@ -819,7 +834,7 @@ function startNetPingTimer() {
   if (netPingTimer) clearInterval(netPingTimer);
   netPingTimer = setInterval(() => {
     if (ws && ws.readyState === WebSocket.OPEN) {
-      try { ws.send(JSON.stringify({ type: "ping", t: Date.now(), recv: receivedFrames, rtt: netRttLastMs })); } catch (err) {}
+      try { ws.send(JSON.stringify({ session_id: activeSessionId, type: "ping", t: Date.now(), recv: receivedFrames, rtt: netRttLastMs })); } catch (err) {}
     }
     autoQualityTick();
   }, 1000);
@@ -847,40 +862,18 @@ function readRefImageDataUrl() {
   });
 }
 
-function applyRefImagePreview() {
-  if (!refImagePreviewDataUrl) return false;
-  if (lastSourceObjectUrl) URL.revokeObjectURL(lastSourceObjectUrl);
-  lastSourceObjectUrl = null;
-  return true;
-}
-
-function updateSourceFrameVisibility() {
-  const enabled = refImageSelected() || !!refImagePreviewDataUrl;
-  if (!enabled) {
-    if (lastSourceObjectUrl) URL.revokeObjectURL(lastSourceObjectUrl);
-    lastSourceObjectUrl = null;
-    return;
-  }
-  applyRefImagePreview();
-}
-
 async function handleRefImageChange() {
   injectedRefImageDataUrl = null;
   if (!refImageSelected()) {
     refImagePreviewDataUrl = null;
-    if (lastSourceObjectUrl) URL.revokeObjectURL(lastSourceObjectUrl);
-    lastSourceObjectUrl = null;
-    updateSourceFrameVisibility();
     syncRefThumb();
     updateMetrics();
     return;
   }
   try {
     await readRefImageDataUrl();
-    applyRefImagePreview();
   } catch (err) {
   }
-  updateSourceFrameVisibility();
   syncRefThumb();
   updateMetrics();
 }
@@ -1152,10 +1145,7 @@ function resetRunMetrics() {
   if (pendingRevokeUrl) { URL.revokeObjectURL(pendingRevokeUrl); pendingRevokeUrl = null; }
   outputImg.onload = outputImg.onerror = null;
   outputImg.removeAttribute("src");
-  if (lastSourceObjectUrl) URL.revokeObjectURL(lastSourceObjectUrl);
-  lastSourceObjectUrl = null;
   hidePeResult();
-  updateSourceFrameVisibility();
   sessionProfileTimings = false;
   stageTimings.innerHTML = "";
   stageTimingsPanel.style.display = "none";
@@ -1253,8 +1243,10 @@ function resetUplinkEncoder() {
 
 function ensureUplinkEncoder(width, height) {
   if (upEncoder && upEncoder.state === "configured") return;
+  const sessionId = activeSessionId;
   upEncoder = new VideoEncoder({
     output: (chunk) => {
+      if (sessionId !== activeSessionId) return;
       const info = upPendingByTs.get(chunk.timestamp);
       upPendingByTs.delete(chunk.timestamp);
       if (!info || !ws || ws.readyState !== WebSocket.OPEN) return;
@@ -1265,7 +1257,7 @@ function ensureUplinkEncoder(width, height) {
       const buf = new ArrayBuffer(chunk.byteLength);
       chunk.copyTo(buf);
       try {
-        ws.send(JSON.stringify({ type: "frame_meta", seq: info.seq, t_capture_ms: info.t_capture_ms }));
+        ws.send(JSON.stringify({ session_id: activeSessionId, type: "frame_meta", seq: info.seq, t_capture_ms: info.t_capture_ms }));
         ws.send(buf);
       } catch (e) {
         return;
@@ -1305,12 +1297,15 @@ function resetOutputDecoder() {
 
 function feedOutputH264(buf, meta) {
   if (!outDecoder || outDecoder.state === "closed") {
+    const sessionId = activeSessionId;
     outDecoder = new VideoDecoder({
       output: (frame) => {
+        if (sessionId !== activeSessionId) { frame.close(); return; }
         const m = outMetaByTs.get(frame.timestamp);
         outMetaByTs.delete(frame.timestamp);
         createImageBitmap(frame).then((bmp) => {
           frame.close();
+          if (sessionId !== activeSessionId) { bmp.close(); return; }
           enqueueOutputFrame(bmp, m);
         }, () => { frame.close(); });
       },
@@ -1328,6 +1323,10 @@ function feedOutputH264(buf, meta) {
 }
 
 function enqueueOutputFrame(frame, meta) {
+  if (meta && meta.session_id && meta.session_id !== activeSessionId) {
+    if (frame instanceof ImageBitmap) frame.close();
+    return;
+  }
   const item = frame instanceof ImageBitmap
     ? { bmp: frame, meta, receivedAtMs: Date.now() }
     : { url: URL.createObjectURL(frame), meta, receivedAtMs: Date.now() };
@@ -1487,6 +1486,7 @@ function frameBlob(width, height, quality) {
 }
 
 async function tick() {
+  const generation = videoPullGeneration;
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   if (pePausedSend) return;
   if (tickInFlight) {
@@ -1509,11 +1509,11 @@ async function tick() {
       return;
     }
     const blob = await frameBlob(width, height, effectiveUpQuality());
-    if (!blob || ws.readyState !== WebSocket.OPEN) return;
+    if (generation !== videoPullGeneration || !blob || !ws || ws.readyState !== WebSocket.OPEN) return;
     const seq = sentFrames + 1;
     const tCaptureMs = Date.now();
     try {
-      ws.send(JSON.stringify({ type: "frame_meta", seq, t_capture_ms: tCaptureMs }));
+      ws.send(JSON.stringify({ session_id: activeSessionId, type: "frame_meta", seq, t_capture_ms: tCaptureMs }));
       if (ws.readyState !== WebSocket.OPEN) return;
       ws.send(blob);
     } catch (err) {
@@ -1523,7 +1523,7 @@ async function tick() {
     sentFramesWindow += 1;
     updateMetrics();
   } finally {
-    tickInFlight = false;
+    if (generation === videoPullGeneration) tickInFlight = false;
   }
 }
 
@@ -1536,17 +1536,17 @@ function seekVideoTo(timeSec) {
     setTimeout(finish, 400);
   });
 }
-async function sendCurrentVideoFrame(mediaTimeSec) {
+async function sendCurrentVideoFrame(mediaTimeSec, generation = videoPullGeneration) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   const width = Number(document.getElementById("width").value);
   const height = Number(document.getElementById("height").value);
   const quality = effectiveUpQuality();
   const blob = await frameBlob(width, height, quality);
-  if (!blob || ws.readyState !== WebSocket.OPEN) return false;
+  if (generation !== videoPullGeneration || !blob || !ws || ws.readyState !== WebSocket.OPEN) return false;
   const seq = sentFrames + 1;
   const tCaptureMs = Math.round(mediaTimeSec * 1000);
   try {
-    ws.send(JSON.stringify({ type: "frame_meta", seq, t_capture_ms: tCaptureMs }));
+    ws.send(JSON.stringify({ session_id: activeSessionId, type: "frame_meta", seq, t_capture_ms: tCaptureMs }));
     if (ws.readyState !== WebSocket.OPEN) return false;
     ws.send(blob);
   } catch (err) {
@@ -1557,8 +1557,8 @@ async function sendCurrentVideoFrame(mediaTimeSec) {
   updateMetrics();
   return true;
 }
-async function pullNextVideoFrame() {
-  if (!videoPullActive) return;
+async function pullNextVideoFrame(generation) {
+  if (generation !== videoPullGeneration || !videoPullActive) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) { videoPullActive = false; return; }
   if (pePausedSend) return;
   if (videoPullIdx >= videoPullTotal) {
@@ -1569,30 +1569,42 @@ async function pullNextVideoFrame() {
   const frameStartMs = Date.now();
   const intervalMs = 1000 / Math.max(1, videoPullFps);
   if (backendPendingFrames() >= MAX_BACKEND_PENDING_FRAMES) {
-    setTimeout(() => { pullNextVideoFrame(); }, 30);
+    videoPullTimer = setTimeout(() => pullNextVideoFrame(generation), 30);
     return;
   }
   const t = videoPullIdx / videoPullFps;
   await seekVideoTo(t);
-  if (!videoPullActive || pePausedSend) return;
-  const ok = await sendCurrentVideoFrame(t);
-  if (!videoPullActive) return;
+  if (generation !== videoPullGeneration || !videoPullActive || pePausedSend) return;
+  const ok = await sendCurrentVideoFrame(t, generation);
+  if (generation !== videoPullGeneration || !videoPullActive) return;
   if (ok) videoPullIdx += 1;
   const spent = Date.now() - frameStartMs;
   const wait = ok ? Math.max(0, intervalMs - spent) : 30;
-  setTimeout(() => { pullNextVideoFrame(); }, wait);
+  videoPullTimer = setTimeout(() => pullNextVideoFrame(generation), wait);
 }
 function startVideoPull() {
+  if (videoPullActive) return;
+  stopVideoPull();
   const dur = (Number.isFinite(camera.duration) && camera.duration > 0) ? camera.duration : 0;
   videoPullTotal = dur > 0 ? Math.max(1, Math.ceil(dur * videoPullFps)) : Number.MAX_SAFE_INTEGER;
   videoPullIdx = 0;
   videoPullActive = true;
-  pullNextVideoFrame();
+  pullNextVideoFrame(videoPullGeneration);
 }
-function stopVideoPull() { videoPullActive = false; }
+function stopVideoPull() {
+  videoPullActive = false;
+  videoPullGeneration += 1;
+  if (videoPullTimer !== null) clearTimeout(videoPullTimer);
+  videoPullTimer = null;
+}
 
 async function beginSession() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  stopVideoPull();
+  activeSessionId = String(Number(activeSessionId) + 1);
+  const sessionId = activeSessionId;
+  const socket = ws;
+  if (!usingVideoFile) invalidatePeSource();
   resetRunMetrics();
   pePausedSend = false;
   clearResultVideo();
@@ -1601,17 +1613,14 @@ async function beginSession() {
     try { camera.pause(); } catch (err) {}
     try { camera.currentTime = 0; } catch (err) {}
   }
-  updateSourceFrameVisibility();
   let refImage = null;
   try {
     refImage = await readRefImageDataUrl();
-    if (refImage) applyRefImagePreview();
   } catch (err) {
   }
+  if (sessionId !== activeSessionId || socket !== ws) return false;
   const rawPrompt = document.getElementById("prompt").value;
-  const peSuppressed = suppressPeThisSend;
-  suppressPeThisSend = false;
-  const usePe = !peSuppressed && !refImage && document.getElementById("usePe").checked;
+  const usePe = document.getElementById("usePe").checked;
   const width = Number(document.getElementById("width").value);
   const height = Number(document.getElementById("height").value);
   const cacheKey = peCacheKey(rawPrompt, refImage);
@@ -1637,6 +1646,7 @@ async function beginSession() {
   }
   const startPayload = {
     type: "start",
+    session_id: activeSessionId,
     prompt: rawPrompt,
     width,
     height,
@@ -1656,15 +1666,14 @@ async function beginSession() {
   }
   if (cachedEnhancedPrompt) startPayload.enhanced_prompt = cachedEnhancedPrompt;
   if (refImage) startPayload.ref_image = refImage;
-  const maxTemporalIds = maxTemporalIdsValue();
-  if (maxTemporalIds !== null) startPayload.max_temporal_ids = maxTemporalIds;
-  startPayload.freeze_kv_on_static = document.getElementById("freezeKvOnStatic").checked;
+  startPayload.max_temporal_ids = maxTemporalIdsValue();
+  startPayload.freeze_kv_on_static = !usingVideoFile && document.getElementById("freezeKvOnStatic").checked;
   const sdt = parseFloat(document.getElementById("staticDiffThresh").value);
   startPayload.static_diff_thresh = Number.isFinite(sdt) ? sdt : 0.5;
   startPayload.profile_timings = document.getElementById("profileTimings").checked;
   sessionProfileTimings = startPayload.profile_timings;
   stageTimingsPanel.style.display = sessionProfileTimings ? "" : "none";
-  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  if (sessionId !== activeSessionId || socket !== ws || !ws || ws.readyState !== WebSocket.OPEN) return false;
   ws.send(JSON.stringify(startPayload));
   return true;
 }
@@ -1688,8 +1697,10 @@ async function start() {
   socket.onopen = async () => {
   };
   socket.onmessage = async (event) => {
+    if (ws !== socket) return;
     if (typeof event.data === "string") {
       const msg = JSON.parse(event.data);
+      if (msg.session_id && msg.session_id !== activeSessionId) return;
       noteBackendAck(msg);
       if (msg.type === "queue_position") {
         const ahead = Number(msg.ahead != null ? msg.ahead : msg.position) || 0;
@@ -1704,6 +1715,7 @@ async function start() {
         return;
       }
       if (msg.type === "started") {
+        peDeferThisSend = msg.pe_deferred ?? (peDeferThisSend && msg.use_pe !== false);
         if (Number(msg.width) > 0 && Number(msg.height) > 0) {
           document.getElementById("width").value = msg.width;
           document.getElementById("height").value = msg.height;
@@ -1731,8 +1743,9 @@ async function start() {
         if (usingVideoFile && peDeferThisSend) {
           ensureOutputPlaybackTimer(true);
           startNetPingTimer();
+          const generation = videoPullGeneration;
           await seekVideoTo(0);
-          await sendCurrentVideoFrame(0);
+          if (generation === videoPullGeneration) await sendCurrentVideoFrame(0, generation);
         } else {
           startFrameTimer();
         }
@@ -1781,7 +1794,8 @@ async function start() {
         clearOutputQueue();
         lastShownCaptureMs = Date.now();
         alignMaxAgeMs = 0;
-        if (usingVideoFile) {
+        if (usingVideoFile && peDeferThisSend && !msg.cached) {
+          peDeferThisSend = false;
           try { camera.pause(); } catch (err) {}
           startVideoPull();
         }
@@ -1864,7 +1878,7 @@ async function start() {
         return;
       }
       if (msg.type === "chunk_done") {
-        try { ws.send(JSON.stringify({ type: "ack", recv: receivedFrames })); } catch (err) {}
+        try { ws.send(JSON.stringify({ session_id: activeSessionId, type: "ack", recv: receivedFrames })); } catch (err) {}
         if (
           chunkProfileLast &&
           (msg.ws_send_s !== undefined || msg.server_residence_s !== undefined) &&
@@ -1899,12 +1913,13 @@ async function start() {
       }
       return;
     }
-    if (startingRun) return;
+    if (startingRun || !pendingOutputMeta ||
+        (pendingOutputMeta.session_id && pendingOutputMeta.session_id !== activeSessionId)) return;
     const meta = pendingOutputMeta;
     pendingOutputMeta = null;
     receivedFrames += 1;
     if (receivedFrames % 4 === 0) {
-      try { ws.send(JSON.stringify({ type: "ack", recv: receivedFrames })); } catch (err) {}
+      try { ws.send(JSON.stringify({ session_id: activeSessionId, type: "ack", recv: receivedFrames })); } catch (err) {}
     }
     receivedFramesWindow += 1;
     if (meta) {
@@ -1935,11 +1950,11 @@ async function start() {
     clearOutputQueue();
     stopRecordDrain();
     finalizeIsForResult = false;
-    resultEpoch += 1;
+    if (!lastRecId) resultEpoch += 1;
     ws = null;
     startingRun = false;
     sessionGranted = false;
-    if (!terminalHold) {
+    if (!terminalHold && !lastRecId) {
       setSendBusy(false, t("busy_disconnected"));
       showOutputIdle(true);
     }
@@ -1969,7 +1984,7 @@ function stopActiveRun() {
   ws = null;
   if (currentWs) {
     try {
-      if (currentWs.readyState === WebSocket.OPEN) currentWs.send(JSON.stringify({ type: "stop" }));
+      if (currentWs.readyState === WebSocket.OPEN) currentWs.send(JSON.stringify({ session_id: activeSessionId, type: "stop" }));
     } catch (err) {}
     currentWs.onopen = null;
     currentWs.onmessage = null;
@@ -2000,7 +2015,7 @@ async function send() {
   await start();
 }
 
-sendBtn.onclick = () => { suppressPeThisSend = false; send(); };
+sendBtn.onclick = send;
 
 const PROMPT_GROUPS = [
   {
@@ -2093,16 +2108,13 @@ function applyCaseSelection(item, group) {
     if (el) el.value = "";
     injectedRefImageDataUrl = REF_IMAGES[item.ref];
     refImagePreviewDataUrl = injectedRefImageDataUrl;
-    applyRefImagePreview();
   } else if (!refImageSelected()) {
     injectedRefImageDataUrl = null;
     refImagePreviewDataUrl = null;
   }
-  updateSourceFrameVisibility();
   syncRefThumb();
   closeCardsPop();
   updateMetrics();
-  suppressPeThisSend = false;
   send();
 }
 
@@ -2121,14 +2133,10 @@ function syncRefThumb() {
   syncPeAvailability();
 }
 
-function refImageActive() {
-  return refImageSelected() || !!injectedRefImageDataUrl || !!refImagePreviewDataUrl;
-}
-
 function syncPeAvailability() {
   const usePeEl = document.getElementById("usePe");
   const peAvailable = !(SERVER_DEFAULTS && SERVER_DEFAULTS.pe_available === false);
-  const locked = refImageActive() || !peAvailable;
+  const locked = !peAvailable;
   if (usePeEl) {
     usePeEl.disabled = locked;
     if (!peAvailable) usePeEl.checked = false;
@@ -2196,6 +2204,7 @@ syncPeAvailability();
 function handleVideoFileChange(event) {
   const file = event.target.files && event.target.files[0];
   if (!file) return;
+  invalidatePeSource();
   stopActiveRun();
   camera.onended = null;
   camera.onloadedmetadata = null;
@@ -2259,12 +2268,13 @@ function handleVideoEnded() {
       showOutputIdle(true);
       setSendBusy(false, "");
     }, 30000);
-    try { ws.send(JSON.stringify({ type: "finalize_recording" })); }
+    try { ws.send(JSON.stringify({ session_id: activeSessionId, type: "finalize_recording" })); }
     catch (err) {}
   }
 }
 
 function switchToCamera() {
+  invalidatePeSource();
   stopActiveRun();
   startingRun = false;
   sessionGranted = false;
@@ -2375,6 +2385,7 @@ function stopResultSync() {
   try { if (usingVideoFile) camera.pause(); } catch (e) {}
 }
 function clearResultVideo() {
+  if (downloadBubble) downloadBubble.disabled = false;
   stopResultSync();
   finalizeIsForResult = false;
   lastRecId = null;
@@ -2406,17 +2417,19 @@ function triggerBrowserDownload(url, filename) {
 }
 function fetchAndSaveRecording() {
   if (resultBlobUrl) triggerBrowserDownload(resultBlobUrl, "joyomni_output.mp4");
+  else if (lastRecId) fetchAndShowResult();
 }
 async function fetchAndShowResult() {
   const myEpoch = resultEpoch;
+  setSendBusy(true, t("toast_finalizing"));
+  if (downloadBubble) downloadBubble.disabled = true;
   try {
     const resp = await fetch("/download_last?rec=" + encodeURIComponent(lastRecId), { cache: "no-store" });
     if (myEpoch !== resultEpoch) return;
     if (!resp.ok) {
       let detail = "";
       try { const j = await resp.json(); detail = j.error || ""; } catch (e) {}
-      setSendBusy(false, "");
-      return;
+      throw new Error(detail || `HTTP ${resp.status}`);
     }
     const blob = await resp.blob();
     if (myEpoch !== resultEpoch) return;
@@ -2425,20 +2438,33 @@ async function fetchAndShowResult() {
     showResultVideo(resultBlobUrl);
     if (usingVideoFile) startResultSync();
     showDownloadBubble(true);
+    if (downloadBubble) downloadBubble.textContent = t("download_done");
     showOutputToast(t("toast_done"), 4000);
-    setSendBusy(false, "");
   } catch (err) {
+    if (myEpoch !== resultEpoch) return;
+    if (outputWaitOverlay) outputWaitOverlay.style.display = "none";
+    showOutputToast(t("download_failed") + String(err.message || err), 8000);
+    if (lastRecId) {
+      showDownloadBubble(true);
+      if (downloadBubble) downloadBubble.textContent = t("download_retry");
+    }
+  } finally {
+    if (myEpoch === resultEpoch) {
+      setSendBusy(false, "");
+      if (downloadBubble) downloadBubble.disabled = false;
+    }
   }
 }
 function onRecordingFinalized(msg) {
   if (finalizeWatchdog) { clearTimeout(finalizeWatchdog); finalizeWatchdog = null; }
-  lastRecId = msg.rec || null;
+  lastRecId = msg.ok === false ? null : (msg.rec || null);
   if (!lastRecId) {
     finalizeIsForResult = false;
     stopResultSync();
     if (outputWaitOverlay) outputWaitOverlay.style.display = "none";
     showOutputIdle(true);
     setSendBusy(false, "");
+    if (msg.message) showOutputToast(msg.message, 8000);
     return;
   }
   finalizeIsForResult = false;
@@ -2555,7 +2581,7 @@ let autoQLowStreak = 0;
 let autoQHoldTicks = 0;
 function sendOutputQuality(v) {
   if (ws && ws.readyState === WebSocket.OPEN && sessionGranted) {
-    try { ws.send(JSON.stringify({ type: "set_output_quality", value: v })); } catch (err) {}
+    try { ws.send(JSON.stringify({ session_id: activeSessionId, type: "set_output_quality", value: v })); } catch (err) {}
   }
 }
 function setDownQuality(v, opts) {
@@ -2661,9 +2687,9 @@ function applyServerDefaults() {
     if (v !== null && v !== undefined) document.getElementById(id).checked = !!v;
   }
   const maxIds = d.max_temporal_ids;
-  if (maxIds !== null && maxIds !== undefined) {
-    document.getElementById("useMaxTemporalIds").checked = true;
-    document.getElementById("maxTemporalIds").value = maxIds;
+  if (maxIds !== undefined) {
+    document.getElementById("useMaxTemporalIds").checked = maxIds !== null;
+    if (maxIds !== null) document.getElementById("maxTemporalIds").value = maxIds;
   }
   if (d.output_quality !== undefined && d.output_quality !== "auto") {
     autoQuality = false;
@@ -2687,7 +2713,6 @@ window.addEventListener("load", () => {
   applyLang();
   applyOrientation(defaultCameraOrientation());
   updateMaxTemporalIdsVisibility();
-  updateSourceFrameVisibility();
   syncRefThumb();
   showOutputIdle(true);
   updateMetrics();

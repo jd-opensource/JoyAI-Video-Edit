@@ -1,14 +1,13 @@
+import asyncio
 import base64
-import json
 import logging
 import os
 import re
-import time
-import urllib.request
 from io import BytesIO
 from typing import List, Optional
 
 from PIL import Image
+import httpx
 
 logger = logging.getLogger("joyomni.pe")
 
@@ -311,10 +310,17 @@ def _message_content_to_text(content) -> str:
 def _sanitize_enhanced(text: str, fallback: str) -> str:
     if not text:
         return fallback
-    cleaned = text
-    cleaned = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", cleaned)
-    cleaned = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", cleaned)
-    cleaned = re.sub(r"https?://\S+", "", cleaned)
+    def clean_link(match):
+        if match.group() in fallback or match.group(2) in fallback:
+            return match.group()
+        return "" if match.group().startswith("!") else match.group(1)
+
+    def clean_url(match):
+        url = match.group().rstrip(".,;:!?，。；：！？)")
+        return match.group() if url in fallback else match.group()[len(url):]
+
+    cleaned = re.sub(r"!?\[([^\]]*)\]\(([^)]*)\)", clean_link, text)
+    cleaned = re.sub(r'https?://[^\s<>"\'\[\]（）“”]+', clean_url, cleaned)
     cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     if len(cleaned) < 10:
@@ -349,52 +355,47 @@ class PromptEnhancer:
         self.base_url = base_url or os.environ.get("OPENAI_BASE_URL") or DEFAULT_BASE_URL
         self.model = model or os.environ.get("PE_MODEL") or DEFAULT_MODEL
         self.anthropic = "/anthropic" in self.base_url
+        self.max_retries = max(1, max_retries)
+
+    def _request(self, system_prompt, user_text, images_b64):
+        headers = {"Authorization": f"Bearer {self.api_key}"}
         if not self.anthropic:
-            from openai import OpenAI
-
-            self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
-        self.max_retries = max_retries
-
-    def _anthropic_complete(self, system_prompt, user_text, images_b64) -> str:
+            return f"{self.base_url.rstrip('/')}/chat/completions", headers, {
+                "model": self.model, "max_completion_tokens": 8192,
+                "messages": _build_messages(system_prompt, user_text, images_b64),
+            }
         content = [{"type": "text", "text": user_text}]
         for i, b64 in enumerate(images_b64):
             content.append({"type": "text", "text": f"\n[Image {i}]:"})
             content.append({"type": "image", "source": {
                 "type": "base64", "media_type": "image/png", "data": b64}})
-        body = json.dumps({
+        body = {
             "model": self.model, "max_tokens": 4096, "system": system_prompt,
             "messages": [{"role": "user", "content": content}],
-        }).encode()
-        req = urllib.request.Request(
-            f"{self.base_url.rstrip('/')}/v1/messages", data=body,
-            headers={"Authorization": f"Bearer {self.api_key}",
-                     "anthropic-version": "2023-06-01",
-                     "Content-Type": "application/json"})
-        resp = json.load(urllib.request.urlopen(req, timeout=90))
-        return "".join(b.get("text", "") for b in resp.get("content", [])
-                       if b.get("type") == "text")
+        }
+        headers["anthropic-version"] = "2023-06-01"
+        return f"{self.base_url.rstrip('/')}/v1/messages", headers, body
 
-    def _chat(self, system_prompt, user_text, images_b64, raw_fallback="") -> Optional[str]:
-        messages = None if self.anthropic else _build_messages(system_prompt, user_text, images_b64)
-        last_err = None
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                if self.anthropic:
-                    text = self._anthropic_complete(system_prompt, user_text, images_b64)
-                else:
-                    resp = self.client.chat.completions.create(
-                        model=self.model, messages=messages, max_completion_tokens=8192
+    async def _chat(self, system_prompt, user_text, images_b64, raw_fallback):
+        url, headers, body = self._request(system_prompt, user_text, images_b64)
+        async with httpx.AsyncClient(timeout=90.0) as client:
+            for attempt in range(1, self.max_retries + 1):
+                try:
+                    response = await client.post(url, headers=headers, json=body)
+                    response.raise_for_status()
+                    data = response.json()
+                    content = data["content"] if self.anthropic else data["choices"][0]["message"]["content"]
+                    return _sanitize_enhanced(_message_content_to_text(content).strip(), raw_fallback)
+                except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+                    retryable = not isinstance(exc, httpx.HTTPStatusError) or (
+                        exc.response.status_code in (408, 409, 429) or exc.response.status_code >= 500
                     )
-                    text = _message_content_to_text(resp.choices[0].message.content)
-                return _sanitize_enhanced(text.strip(), raw_fallback or text.strip())
-            except Exception as e:  # noqa: BLE001
-                last_err = e
-                logger.warning("PE attempt %d/%d failed: %s", attempt, self.max_retries, e)
-                time.sleep(min(attempt, 5))
-        logger.error("PE failed after %d attempts: %s", self.max_retries, last_err)
-        return None
+                    if not retryable or attempt == self.max_retries:
+                        raise
+                    logger.warning("PE attempt %d/%d failed: %s", attempt, self.max_retries, type(exc).__name__)
+                    await asyncio.sleep(min(attempt, 5))
 
-    def __call__(self, task_type, user_prompt, video=None, ref_image=None) -> Optional[str]:
+    async def enhance(self, task_type, user_prompt, video=None, ref_image=None, *, timeout=90.0):
         if not user_prompt or not user_prompt.strip():
             return user_prompt
         video_frames = _video_frames_to_b64(video)
@@ -404,8 +405,15 @@ class PromptEnhancer:
                 logger.warning("RV2V PE needs a reference image; using raw prompt")
                 return user_prompt
             text = RV2V_TEMPLATE.format(user_prompt=user_prompt)
-            return self._chat(
-                RV2V_SYSTEM_PROMPT, text, [reference, *video_frames], raw_fallback=user_prompt,
-            ) or user_prompt
-        text = V2V_TEMPLATE.format(user_prompt=user_prompt)
-        return self._chat(SYSTEM_PROMPT, text, video_frames, raw_fallback=user_prompt) or user_prompt
+            system, images = RV2V_SYSTEM_PROMPT, [reference, *video_frames]
+        else:
+            text = V2V_TEMPLATE.format(user_prompt=user_prompt)
+            system, images = SYSTEM_PROMPT, video_frames
+        return await asyncio.wait_for(self._chat(system, text, images, user_prompt), timeout=timeout)
+
+    def __call__(self, task_type, user_prompt, video=None, ref_image=None, *, timeout=90.0) -> Optional[str]:
+        try:
+            return asyncio.run(self.enhance(task_type, user_prompt, video, ref_image, timeout=timeout))
+        except Exception as exc:
+            logger.warning("PE failed: %s; using raw prompt", type(exc).__name__)
+            return user_prompt
