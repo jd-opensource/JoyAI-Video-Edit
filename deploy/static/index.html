@@ -1108,6 +1108,7 @@ function resetRunMetrics() {
   sentFrames = 0;
   backendAckedFrames = 0;
   backendOutFrames = 0;
+  videoPullTotal = 0;
   receivedFrames = 0;
   displayedFrames = 0;
   sendRealtimeSkips = 0;
@@ -2330,8 +2331,8 @@ function updateUploadProgress() {
   if (outputWaitOverlay) outputWaitOverlay.style.display = "";
   if (outputWaitIco) outputWaitIco.textContent = "✨";
   let label = t("edit_processing");
-  if (sentFrames > 0) {
-    const pct = Math.max(0, Math.min(100, Math.round(backendOutFrames / sentFrames * 100)));
+  if (videoPullTotal > 0 && videoPullTotal < Number.MAX_SAFE_INTEGER) {
+    const pct = Math.max(0, Math.min(99, Math.floor(backendOutFrames / videoPullTotal * 100)));
     label = label + " " + pct + "%";
   }
   if (outputWaitHint) outputWaitHint.textContent = label;

@@ -70,13 +70,13 @@ def _gencodes():
             "-gencode=arch=compute_120,code=compute_120",
         ]
     else:
-        # No SASS for sm_100/sm_120 on this toolchain; embed sm_90 PTX so the
-        # driver can JIT for Blackwell (sm_100/sm_120) at load time. Correctness
-        # only — for tuned Blackwell SASS, build on CUDA >= 12.8.
+        # compute_90 PTX supports generic-kernel JIT on newer GPUs.
+        # Blackwell FP8 GEMM requires CUDA >= 12.8 and sm_100a/sm_120a.
         flags += ["-gencode=arch=compute_90,code=compute_90"]
         print(
-            f"[joyomni_ops] nvcc {mj}.{mn} < 12.8: SASS sm_80/89/90a + sm_90 PTX "
-            f"(JIT fallback for Blackwell). Build on CUDA >= 12.8 for native sm_100a/sm_120a."
+            f"[joyomni_ops] nvcc {mj}.{mn} < 12.8: SASS sm_80/89/90a + compute_90 PTX "
+            "(generic-kernel JIT only). Blackwell FP8 GEMM requires CUDA >= 12.8 "
+            "and sm_100a/sm_120a."
         )
     return flags
 

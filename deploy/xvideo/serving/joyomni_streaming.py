@@ -776,7 +776,8 @@ class JoyOmniV2VStreamingSession:
         gather_chunk_ids: list[int],
     ):
         mti = self.settings.max_temporal_ids
-        if not graph_env_enabled() or mti is None or self.settings.num_inference_steps < 1:
+        mti = GRAPH_WINDOW_CHUNKS - 1 if mti is None else mti
+        if not graph_env_enabled() or self.settings.num_inference_steps < 1:
             return None
         if self.chunk_size != 1 or len(selected_chunk_ids) != GRAPH_WINDOW_CHUNKS:
             return None
@@ -784,7 +785,7 @@ class JoyOmniV2VStreamingSession:
             return None
         if gather_chunk_ids != [0, chunk_idx - 1, chunk_idx]:
             return None
-        if selected_chunk_ids[0] != 0 or selected_chunk_ids[-1] != chunk_idx:
+        if selected_chunk_ids != gather_chunk_ids:
             return None
 
         runner = self.runtime.graph_runners.get(self._graph_key())
@@ -835,7 +836,8 @@ class JoyOmniV2VStreamingSession:
 
     def _maybe_prepare_graph_runner(self) -> None:
         mti = self.settings.max_temporal_ids
-        if not graph_env_enabled() or mti is None or self.chunk_size != 1:
+        mti = GRAPH_WINDOW_CHUNKS - 1 if mti is None else mti
+        if not graph_env_enabled() or self.chunk_size != 1:
             return
         if not self.settings.store_clean_self_only:
             return

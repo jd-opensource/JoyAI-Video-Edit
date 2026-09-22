@@ -23,7 +23,7 @@ The first three and the quant are dependency-free hand-written CUDA. Only
 ## Build
 
 ```bash
-# Full build (needs a cutlass checkout; CUDA >= 12.8 for Blackwell SASS):
+# Full build (needs a cutlass checkout; CUDA >= 12.8 for Blackwell FP8 GEMM):
 JOYOMNI_OPS_CUTLASS_DIR=/path/to/cutlass pip install .
 
 # Light build, no FP8 GEMM / no cutlass:
@@ -33,12 +33,12 @@ JOYOMNI_OPS_NO_FP8=1 pip install .
 ### GPU architectures
 
 Chosen automatically from the local nvcc:
-- always: `sm_80`, `sm_89`, `sm_90`
+- always: `sm_80`, `sm_89`, `sm_90a`
 - CUDA ≥ 12.8: also `sm_100a` (B200) and `sm_120a` (RTX PRO 6000 / RTX 5090)
-- on CUDA < 12.8 an `sm_90` PTX is embedded so the driver JITs for Blackwell
-  (correctness only; build on CUDA ≥ 12.8 for tuned Blackwell SASS)
+- on CUDA < 12.8, `compute_90` PTX provides a JIT fallback for generic kernels only.
+  Blackwell FP8 GEMM requires CUDA ≥ 12.8 targeting `sm_100a` or `sm_120a`.
 
-Override with `JOYOMNI_OPS_CUDA_ARCHS="90;100a;120a"`.
+Override with `JOYOMNI_OPS_CUDA_ARCHS="90a;100a;120a"`.
 
 cutlass commit matching the reference build: `dcf215af`.
 
