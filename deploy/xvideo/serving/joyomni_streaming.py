@@ -206,6 +206,23 @@ class JoyOmniRuntime:
         self.lossless_output = False
         self.graph_runners: dict[tuple, StreamingGraphRunner] = {}
         self.graph_capture_failures: dict[tuple, int] = {}
+        self._last_dit_precision_summary: str | None = None
+        self._dit_precision_settled = False
+
+    def _log_dit_precision(self) -> None:
+        if self._dit_precision_settled:
+            return
+
+        from xvideo.models.dit.dit import fp8_precision_report
+
+        status, summary = fp8_precision_report(self.pipeline.transformer)
+        if summary != self._last_dit_precision_summary:
+            print(f"#####[STREAM] {summary}", flush=True)
+            self._last_dit_precision_summary = summary
+        self._dit_precision_settled = all(
+            stream_status["effective"] in {"fp8", "bf16"}
+            for stream_status in status.values()
+        )
 
     @classmethod
     def load(
@@ -357,6 +374,8 @@ class JoyOmniRuntime:
         else:
             for (_wh, _ww) in _orientations:
                 runtime.warmup_full_pipeline(height=_wh, width=_ww)
+
+        runtime._log_dit_precision()
 
         if device_obj.type == "cuda":
             _free_b, _total_b = torch.cuda.mem_get_info(device_obj)
@@ -1022,7 +1041,7 @@ class JoyOmniV2VStreamingSession:
             gather_chunk_ids=gather_chunk_ids,
         )
         if runner is not None:
-            return self._denoise_chunk_graph(
+            result = self._denoise_chunk_graph(
                 runner,
                 ref_chunk_latent,
                 current_chunk_latents,
@@ -1030,6 +1049,8 @@ class JoyOmniV2VStreamingSession:
                 history_chunk_ids=history_chunk_ids,
                 active_chunk_id=active_chunk_id,
             )
+            self.runtime._log_dit_precision()
+            return result
 
         self.pipeline.scheduler.set_timesteps(self.settings.num_inference_steps, device=self.device)
         timesteps_for_chunk = self.pipeline.scheduler.timesteps
@@ -1105,6 +1126,7 @@ class JoyOmniV2VStreamingSession:
             store_mode=store_mode,
         )
         self._timer_record(profile, "kv_store_forward_s", started)
+        self.runtime._log_dit_precision()
         return current_chunk_latents
 
     def _evict_after_store(

@@ -9,6 +9,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
+from xvideo.fp8_status import format_fp8_precision_status, fp8_precision_status
+
 
 from diffusers.models import ModelMixin
 from diffusers.configuration_utils import ConfigMixin, register_to_config
@@ -101,6 +103,18 @@ def _maybe_install_fp8_stream(block, stream: str) -> None:
 
 def _fp8_stream_enabled(block, stream: str) -> bool:
     return bool(getattr(block, f"_fp8_{stream}_installed", False))
+
+
+def fp8_precision_report(transformer) -> tuple[dict, str]:
+    """Return requested/effective FP8 state and its runtime summary."""
+    status = fp8_precision_status(
+        transformer,
+        {
+            "img": _FP8_IMG_ENABLED,
+            "txt": _FP8_TXT_ENABLED,
+        },
+    )
+    return status, format_fp8_precision_status(status)
 
 
 
