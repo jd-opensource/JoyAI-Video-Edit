@@ -206,6 +206,25 @@ class JoyOmniRuntime:
         self.lossless_output = False
         self.graph_runners: dict[tuple, StreamingGraphRunner] = {}
         self.graph_capture_failures: dict[tuple, int] = {}
+        self._last_dit_precision_summary: str | None = None
+        self._dit_precision_settled = False
+
+    def _log_dit_precision(self) -> None:
+        if self._dit_precision_settled:
+            return
+
+        from xvideo.models.dit.dit import fp8_precision_report
+
+        status, summary = fp8_precision_report(
+            self.pipeline.transformer, base_precision=self.cfg.dit_precision,
+        )
+        if summary != self._last_dit_precision_summary:
+            print(f"#####[STREAM] {summary}", flush=True)
+            self._last_dit_precision_summary = summary
+        self._dit_precision_settled = all(
+            stream_status["effective"] in {"fp8", self.cfg.dit_precision}
+            for stream_status in status.values()
+        )
 
     @classmethod
     def load(
@@ -357,6 +376,8 @@ class JoyOmniRuntime:
         else:
             for (_wh, _ww) in _orientations:
                 runtime.warmup_full_pipeline(height=_wh, width=_ww)
+
+        runtime._log_dit_precision()
 
         if device_obj.type == "cuda":
             _free_b, _total_b = torch.cuda.mem_get_info(device_obj)
@@ -1471,6 +1492,7 @@ class JoyOmniV2VStreamingSession:
                             chunk_idx=encoded.job.chunk_idx,
                             frozen_anchor_id=encoded.job.frozen_anchor_id,
                         )
+                        self.runtime._log_dit_precision()
                         self._evict_after_store(
                             encoded.job.chunk_idx,
                             frozen_anchor_id=encoded.job.frozen_anchor_id,
