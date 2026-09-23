@@ -215,12 +215,14 @@ class JoyOmniRuntime:
 
         from xvideo.models.dit.dit import fp8_precision_report
 
-        status, summary = fp8_precision_report(self.pipeline.transformer)
+        status, summary = fp8_precision_report(
+            self.pipeline.transformer, base_precision=self.cfg.dit_precision,
+        )
         if summary != self._last_dit_precision_summary:
             print(f"#####[STREAM] {summary}", flush=True)
             self._last_dit_precision_summary = summary
         self._dit_precision_settled = all(
-            stream_status["effective"] in {"fp8", "bf16"}
+            stream_status["effective"] in {"fp8", self.cfg.dit_precision}
             for stream_status in status.values()
         )
 
@@ -1041,7 +1043,7 @@ class JoyOmniV2VStreamingSession:
             gather_chunk_ids=gather_chunk_ids,
         )
         if runner is not None:
-            result = self._denoise_chunk_graph(
+            return self._denoise_chunk_graph(
                 runner,
                 ref_chunk_latent,
                 current_chunk_latents,
@@ -1049,8 +1051,6 @@ class JoyOmniV2VStreamingSession:
                 history_chunk_ids=history_chunk_ids,
                 active_chunk_id=active_chunk_id,
             )
-            self.runtime._log_dit_precision()
-            return result
 
         self.pipeline.scheduler.set_timesteps(self.settings.num_inference_steps, device=self.device)
         timesteps_for_chunk = self.pipeline.scheduler.timesteps
@@ -1126,7 +1126,6 @@ class JoyOmniV2VStreamingSession:
             store_mode=store_mode,
         )
         self._timer_record(profile, "kv_store_forward_s", started)
-        self.runtime._log_dit_precision()
         return current_chunk_latents
 
     def _evict_after_store(
@@ -1493,6 +1492,7 @@ class JoyOmniV2VStreamingSession:
                             chunk_idx=encoded.job.chunk_idx,
                             frozen_anchor_id=encoded.job.frozen_anchor_id,
                         )
+                        self.runtime._log_dit_precision()
                         self._evict_after_store(
                             encoded.job.chunk_idx,
                             frozen_anchor_id=encoded.job.frozen_anchor_id,

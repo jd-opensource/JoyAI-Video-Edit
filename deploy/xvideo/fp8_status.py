@@ -1,4 +1,4 @@
-"""Small, dependency-free helpers for reporting effective DiT FP8 state."""
+"""Dependency-free helpers for reporting DiT Linear quantization state."""
 
 from __future__ import annotations
 
@@ -12,11 +12,14 @@ _STREAMS = ("img", "txt")
 def fp8_precision_status(
     transformer: Any,
     requested_by_stream: Mapping[str, bool],
+    *,
+    base_precision: str,
 ) -> dict[str, dict[str, Any]]:
-    """Return requested and installed FP8 state for each DiT stream.
+    """Return requested and installed FP8 Linear state for each DiT stream.
 
     FP8 weights are installed lazily during block forwards, so a requested
-    stream with no converted blocks is pending rather than bf16.
+    stream with no converted blocks is pending. Unconverted streams use the
+    configured base precision; this does not describe every DiT operator.
     """
     blocks = tuple(getattr(transformer, "double_blocks", ()))
     total_blocks = len(blocks)
@@ -37,7 +40,7 @@ def fp8_precision_status(
         elif requested:
             effective = "pending"
         else:
-            effective = "bf16"
+            effective = base_precision
         result[stream] = {
             "requested": requested,
             "effective": effective,
@@ -57,18 +60,7 @@ def format_fp8_precision_status(status: Mapping[str, Mapping[str, Any]]) -> str:
         requested = "yes" if item["requested"] else "no"
         installed = item["installed_blocks"]
         total = item["total_blocks"]
-        if effective == "fp8":
-            detail = f"requested={requested}; {installed}/{total} blocks converted"
-        elif effective == "bf16":
-            detail = f"requested={requested}; FP8 not requested"
-        elif effective == "pending":
-            detail = f"requested={requested}; {installed}/{total} blocks converted lazily"
-        elif effective == "mixed":
-            detail = (
-                f"requested={requested}; FP8 active in {installed}/{total} blocks; "
-                "conversion incomplete"
-            )
-        else:
-            detail = "no DiT blocks found"
-        parts.append(f"{stream}={effective} ({detail})")
-    return "DiT precision: " + ", ".join(parts)
+        parts.append(
+            f"{stream}={effective} (requested={requested}; FP8 blocks={installed}/{total})"
+        )
+    return "DiT Linear precision: " + ", ".join(parts)

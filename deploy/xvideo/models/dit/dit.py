@@ -105,14 +105,12 @@ def _fp8_stream_enabled(block, stream: str) -> bool:
     return bool(getattr(block, f"_fp8_{stream}_installed", False))
 
 
-def fp8_precision_report(transformer) -> tuple[dict, str]:
-    """Return requested/effective FP8 state and its runtime summary."""
+def fp8_precision_report(transformer, *, base_precision: str) -> tuple[dict, str]:
+    """Return DiT Linear FP8 state and its runtime summary."""
     status = fp8_precision_status(
         transformer,
-        {
-            "img": _FP8_IMG_ENABLED,
-            "txt": _FP8_TXT_ENABLED,
-        },
+        {stream: _fp8_stream_wanted(stream) for stream in ("img", "txt")},
+        base_precision=base_precision,
     )
     return status, format_fp8_precision_status(status)
 
