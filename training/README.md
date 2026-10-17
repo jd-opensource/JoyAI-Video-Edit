@@ -2,6 +2,8 @@
 
 This directory provides autoregressive adaptation, Resilient-DMD distillation, long-horizon fine-tuning, and evaluation on LongV2VBench and OpenVE-Bench for JoyAI-Video-Edit.
 
+We provide a [bidirectional version](https://huggingface.co/jdopensource/JoyAI-Video-Edit/blob/main/dit/pretrain_editing_bid_version.pth) of the model that supports T2I, T2V, I2I, and V2V. You can use this checkpoint as a starting point for autoregressive adaptation followed by Resilient-DMD distillation, or further adapt and optimize it for your own tasks.
+
 Follow the [main README](../README.md#quick-start) to set up the environment and prepare model weights. Activate that environment, then enter `training/` from the repository root. Run all commands below from this directory:
 
 ```bash
