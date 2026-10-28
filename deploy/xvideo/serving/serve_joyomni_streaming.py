@@ -372,6 +372,46 @@ def _person_present(image: Image.Image, *, onnx_path: str, conf: float) -> bool:
     out = net.forward()
     return float(out[0, 4, :].max()) >= float(conf)
 
+def _full_body_box_ready(box, face_center, image_width, image_height):
+    """Check person/face framing; does not verify foot visibility."""
+    x, y, w, h = box
+    fx, fy, face_short = face_center
+    if w <= 0 or h <= 0 or face_short <= 0:
+        return False
+    if x < .01 or y < .01 or x + w > .99 or y + h > .97:
+        return False
+    visible_h = min(y + h, 1.0) - y
+    if not (x <= fx <= x + w and y <= fy <= y + .3 * visible_h):
+        return False
+    return visible_h >= .35 and visible_h * image_height >= 6 * face_short * min(image_width, image_height)
+
+
+def _check_full_body_gate(image, *, face_center, onnx_path, conf):
+    net = _get_person_net(onnx_path)
+    if net is None:
+        return "full_body_unavailable"
+    if face_center is None:
+        return "full_body_needed"
+    import cv2
+    import numpy as np
+    rgb = np.ascontiguousarray(np.asarray(image.convert("RGB")))
+    blob = cv2.dnn.blobFromImage(rgb, 1.0 / 255.0, (320, 320), swapRB=False, crop=False)
+    net.setInput(blob)
+    predictions = net.forward()[0]
+    boxes, scores = [], []
+    for i in np.flatnonzero(predictions[4] >= conf):
+        cx, cy, w, h = (float(v) / 320 for v in predictions[:4, i])
+        boxes.append([cx - w / 2, cy - h / 2, w, h])
+        scores.append(float(predictions[4, i]))
+    if not boxes:
+        return "full_body_needed"
+    keep = cv2.dnn.NMSBoxes(boxes, scores, conf, .45)
+    for i in np.asarray(keep).reshape(-1):
+        if _full_body_box_ready(boxes[int(i)], face_center, image.width, image.height):
+            return None
+    return "full_body_needed"
+
+
 async def _enhance_prompt(
     *,
     raw_prompt: str,
@@ -662,6 +702,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             "kv_reset_frames": args.kv_reset_frames,
             "output_quality": args.output_quality,
             "online_gate": args.online_gate,
+            "full_body_start": args.full_body_start,
             "static_diff_thresh": args.static_diff_thresh,
             "freeze_kv_on_static": args.freeze_kv_on_static,
             "profile_timings": args.profile_timings,
@@ -811,6 +852,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         session_settings: StreamingSettings | None = None
         ref_image: Image.Image | None = None
         face_gate_pending = False
+        full_body_gate_pending = False
+        first_edit_capture_ms = None
         pe_defer = False
         pe_task: asyncio.Task | None = None
         session_max_inflight = max(0, int(args.max_inflight_chunks or 0))
@@ -1318,7 +1361,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     raise RuntimeError(app.state.runtime_error)
                 if output_task is not None and output_task.done():
                     output_task.result()
-                if frames_out != last_frames_out or pe_task is not None:
+                if (frames_out != last_frames_out or pe_task is not None
+                        or edit_frames > completed_frames):
                     last_frames_out = frames_out
                     last_activity = time.monotonic()
                 if time.monotonic() - last_activity >= HOLDER_IDLE_TIMEOUT_S:
@@ -1400,8 +1444,14 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         ))
                         use_pe = bool(payload.get("use_pe", args.use_pe)) and bool(os.environ.get("OPENAI_API_KEY"))
 
-                        entry_gate = bool(payload.get("gate_enabled", True)) and not lossless_mode
+                        presence_gate_enabled = bool(payload.get("gate_enabled", True)) and not lossless_mode
+                        full_body_start = bool(payload.get("full_body_start", args.full_body_start))
+                        full_body_gate_pending = full_body_start
+                        entry_gate = presence_gate_enabled or full_body_start
                         face_gate_pending = entry_gate
+                        first_edit_capture_ms = None
+                        face_present_min_ratio = (args.full_body_face_min_ratio if full_body_start
+                                                  else args.face_present_min_ratio)
                         flow["recv"] = None
                         flow["at"] = 0.0
                         flow["congested"] = False
@@ -1411,7 +1461,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         flow["base"] = frames_out
                         flow.update(has_ack=False, dropped=0, skew_min=None, skew_at=0.0, up_ms=0.0)
 
-                        gate_on = bool(args.online_gate) and entry_gate
+                        gate_on = bool(args.online_gate) and presence_gate_enabled
 
                         fg_score = float(payload.get("fg_score", args.face_gate_score))
                         fg_min_below = float(payload.get("fg_min_below_ratio", args.face_gate_min_below_ratio))
@@ -1450,7 +1500,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         pe_report = None
                         pe_defer = False
                         if use_pe:
-                            cached_enhanced_prompt = str(payload.get("enhanced_prompt") or "").strip()
+                            # A cached close-up PE must not bypass the new full-body anchor.
+                            cached_enhanced_prompt = "" if full_body_start else str(payload.get("enhanced_prompt") or "").strip()
                             if cached_enhanced_prompt:
                                 session_prompt = cached_enhanced_prompt
                                 pe_report = {
@@ -1516,6 +1567,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                 "kv_reset_frames": kv_reset_frames,
                                 "use_pe": use_pe,
                                 "pe_deferred": pe_defer,
+                                "full_body_start": full_body_start,
                                 "pe_model": args.pe_model or DEFAULT_PE_MODEL,
                                 "max_temporal_ids": max_temporal_ids,
                                 "freeze_kv_on_static": freeze_kv_on_static,
@@ -1537,6 +1589,10 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                               "message": "Recording is not enabled (--record-dir is unset)."})
                             continue
 
+                        if full_body_start and full_body_gate_pending:
+                            await _send_json({"type": "recording_finalized", "ok": False,
+                                              "message": "No stable full-body view was found. Show your head and feet, then hold still."})
+                            continue
                         try:
                             if pe_task is not None:
                                 await pe_task
@@ -1553,6 +1609,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             "type": "recording_finalized",
                             "ok": finalized is not None,
                             "rec": finalized.name if finalized is not None else None,
+                            "source_start_s": float(first_edit_capture_ms or 0) / 1000 if lossless_mode else 0,
                             "message": None if finalized is not None
                             else "No downloadable result yet. Send an edit first.",
                         })
@@ -1666,6 +1723,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
 
                 if kv_reset_frames > 0 and frames_since_session_reset >= kv_reset_frames:
                     face_gate_pending = entry_gate
+                    full_body_gate_pending = full_body_start
                     gate_state["count"] = 0
                     gate_state["cx"] = None
                     gate_state["cy"] = None
@@ -1683,7 +1741,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 _prof_on = session_settings is not None and session_settings.profile_timings
 
                 def _run_frame():
-                    nonlocal edit_frames
+                    nonlocal edit_frames, full_body_gate_pending, first_edit_capture_ms
                     if uplink_frame is not None:
                         frame = uplink_frame
                     elif _prof_on:
@@ -1705,6 +1763,15 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             gate_state["settle_ax"] = None
                             gate_state["settle_ay"] = None
                             return _reason
+                        if full_body_gate_pending:
+                            _body_reason = _check_full_body_gate(
+                                frame, face_center=_center,
+                                onnx_path=args.person_detector_onnx, conf=float(args.person_gate_conf))
+                            if _body_reason is not None:
+                                gate_state["count"] = 0
+                                gate_state["settle_ax"] = gate_state["settle_ay"] = None
+                                gate_state["settle_asz"] = None
+                                return _body_reason
                         if _center is not None:
                             _cx, _cy, _csz = _center
 
@@ -1740,6 +1807,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             if gate_state["count"] < fg_stable:
                                 return "settling"
 
+                        full_body_gate_pending = False
                         if pe_defer:
                             gate_state["pe_anchor"] = frame
                             return "__gate_pe__"
@@ -1755,7 +1823,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             if gate_state["person_last"]:
                                 gate_state["face_last"] = _face_present_from(
                                     _gfaces, _gfw, _gfh,
-                                    min_ratio=float(args.face_present_min_ratio),
+                                    min_ratio=float(face_present_min_ratio),
                                     edge_margin=float(args.face_present_edge_margin))
                             else:
                                 gate_state["face_last"] = True
@@ -1853,6 +1921,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             )
                             return []
 
+                        if first_edit_capture_ms is None:
+                            first_edit_capture_ms = frame_meta.get("t_capture_ms", 0.0)
                         _rec_i = rec_input
                         if _rec_i is not None:
                             _rec_i.submit(frame, frame_meta.get("t_capture_ms"))
@@ -1891,6 +1961,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         continue
                     if sentinel == "__person_returned__":
                         face_gate_pending = True
+                        full_body_gate_pending = full_body_start
                         gate_state["count"] = 0
                         gate_state["cx"] = None
                         gate_state["cy"] = None
@@ -2011,6 +2082,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pe-timeout-s", type=float, default=20.0, help="Hard wall-clock cap for deferred prompt-enhancement. On timeout the session degrades to the RAW prompt and starts editing, so a slow/hung PE endpoint (bad network / provider stall) can never wedge the client in the prompt-enhancement state.")
 
     parser.add_argument("--face-detector-onnx", type=str, default=DEFAULT_FACE_DETECTOR_ONNX, help="YuNet ONNX weight for the face-presence gate. Missing -> gate disabled (edits run unconditionally).")
+    parser.add_argument("--full-body-start", action=argparse.BooleanOptionalAction, default=False,
+                        help="Optional full-body framing and stable-face entry gate (camera and file inputs). Off by default; independent of the presence gate. Uses person-box/face geometry, not foot keypoints.")
+    parser.add_argument("--full-body-face-min-ratio", type=float, default=0.05,
+                        help="Online minimum face ratio when full-body start is enabled; ordinary sessions retain --face-present-min-ratio.")
     parser.add_argument("--face-gate-score", type=float, default=0.35, help="Min YuNet confidence to count as a face. Lower = detects motion-blurred faces (fewer transient drops), but more false positives.")
     parser.add_argument("--face-present-min-ratio", type=float, default=0.15, help="Mid-session presence: a detected face counts as 'present' only if its short side is >= this fraction of the frame short side. A too-small/partial face (subject sat down so only the top of the head shows) counts as no-face -> black-hold, instead of letting the model t2v-hallucinate a person. 0 = any face counts. Higher = stricter (black out sooner when the face gets small/far). Normal editing faces measure ~0.35, so 0.15 has a wide margin.")
     parser.add_argument("--face-present-edge-margin", type=float, default=0.0, help="Mid-session presence: a face whose box comes within this fraction of ANY frame border counts as a HALF/partial face (turned/leaned out) -> no-face -> black-hold, so the model never edits a half-face frame (which it fills in as a t2v hallucination). 0 = no edge check (default: disabled -- the face-box edge check false-blacked too eagerly when a face merely neared a border). Set e.g. 0.02 to re-enable a lenient check.")

@@ -415,7 +415,9 @@ class JoyOmniRuntime:
         t0 = time.time()
 
         ffactor_t = int(self.pipeline.vae_scale_factor_temporal)
-        n_frames = 1 + max(0, num_chunks - 1) * ffactor_t + ffactor_t
+        num_chunks = max(1, int(num_chunks))
+        n_frames = 1 + (num_chunks - 1) * ffactor_t
+        warmup_timeout = max(1.0, float(os.environ.get("JOYOMNI_LOAD_WARMUP_TIMEOUT_S", "600")))
         print(f"#####[STREAM] full-pipeline warmup: {num_chunks} chunks (~{n_frames} frames) at {width}x{height}")
         session = None
         try:
@@ -438,17 +440,19 @@ class JoyOmniRuntime:
                 if completed >= num_chunks:
                     break
 
-            deadline = time.time() + 120.0
-            while completed < num_chunks and time.time() < deadline:
+            deadline = time.monotonic() + warmup_timeout
+            while completed < num_chunks and time.monotonic() < deadline:
                 r = session.wait_async_result(timeout=0.5)
                 if r is not None:
                     completed += 1
+            if completed < num_chunks:
+                raise TimeoutError(f"full-pipeline warmup incomplete: {completed}/{num_chunks} chunks after {warmup_timeout:.0f}s")
             print(f"#####[STREAM] full-pipeline warmup done: {completed} chunks in {time.time() - t0:.1f}s")
         except Exception as exc:
             print(f"#####[STREAM] full-pipeline warmup skipped/failed: {exc!r}")
         finally:
             if session is not None:
-                session.close()
+                session.close(timeout=warmup_timeout)
 
 class JoyOmniV2VStreamingSession:
     _session_serial_counter = 0

@@ -93,6 +93,28 @@ FOUNDATION of your prompt, and seamlessly expand them into a highly detailed, co
   surrounding spatial textures and lighting."
 - Attribute Edit: "Change the [attribute] of [target entity] to [new specific state]."
 
+[Clothing & Footwear]
+- For clothing or footwear replacement, whether one item or a complete outfit, aim for about
+  100 words in total, with one brief preservation sentence. For replacement garments, use one
+  concise tailoring clause for a naturally slender fit within the requested cut, preserving source
+  anatomy and loose styles. Attribute-only garment edits retain cut.
+- For trouser-only edits, preserve the source waistband height and the top's hem, drape and
+  overlap over the waistband; do not introduce a higher rise or tuck the top into the trousers.
+- For flared trousers, lead with fitted knees and lower legs widening smoothly to open hems
+  visibly wider than the knees; a slight flare stays subtle and tailored. Replace the source
+  leg outline, describing only the requested cut and prioritizing it over creases or waist styling.
+- For requested full-length sleeves, lead with continuous fabric from shoulders across elbows
+  and forearms to cuffs touching the hand bases; replace the source sleeve silhouette, not a layer
+  beneath it. Prioritize this construction over graphics and omit the source sleeve length.
+- For a cheongsam/qipao without an explicit cut request, describe a dress with a Mandarin collar,
+  chest frog fastenings and one continuous opaque skirt around both legs; front, back and side panels
+  stay joined to the hem during source motion. Use construction terms instead of qipao/cheongsam or
+  slit/opening terms in the final prompt. Keep requested sleeves/materials and the source crop.
+- Map the default apricot clothing/footwear color to warm off-white (near white). Throughout the
+  final prompt, replace that label with "warm off-white"; never repeat "apricot" or use beige/tan/brown
+  for this color, including material and reflection descriptions. Explicit fruit/orange hues and
+  exact color codes override this default.
+
 [Global Stylization & Environment]
 - Background Replacement: "Replace the original background with [highly detailed description of the
   new environment], ensuring the foreground elements are seamlessly integrated with matching global
@@ -209,7 +231,22 @@ all requested changes first; preserve only attributes outside that combined edit
   Preserve the source person's identity, face, hair, body proportions and pose within the unchanged
   scope.
   The reference model's face, body, pose and background are not part of a clothing transfer.
-  Fit the garment naturally to the source body, with correct overlap and contact at hands/arms.
+  For requested or reference flared trousers, prioritize a fitted knee and seams widening
+  below it to loose hems wider than the knee; keep a slight flare modest. Trouser-only edits
+  retain the source waistband height and the original top hem, drape and overlap.
+  For requested/reference full-length sleeves, prioritize continuous fabric from shoulders
+  across elbows and forearms to cuffs touching the hand bases, replacing the source sleeve
+  silhouette. Omit the source sleeve length; describe only construction inside the source crop.
+  Fit transferred garments naturally to the source anatomy, using one concise slender-tailoring
+  clause within the requested/reference cut, including loose styles. Attribute-only edits retain cut.
+  For qipao replacement, default to one continuous opaque skirt wrapping both legs to the hem,
+  with joined panels deforming together. Describe the reference's collar and dress construction
+  instead of qipao/cheongsam or slit/opening terms. Explicit cut or exact-copy requests override.
+  Retain other reference details, natural overlap/contact and the source crop; omit offscreen parts.
+- Clothing/footwear color: follow the reference unless explicitly recoloring; describe its actual
+  color rather than echoing an ambiguous user color label. For default apricot recoloring, use only
+  "warm off-white" (near white) throughout the final prompt, never "apricot" or beige/tan/brown.
+  Explicit fruit/orange hues and exact color codes override; keep other items in their own colors.
 - Background: replace the original environment with the environment in the reference, describing
   its main visible structures. Keep the source foreground person and their clothing. Remove old
   background furniture only when it is actually visible. Do not add people from the reference.

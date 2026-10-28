@@ -255,6 +255,7 @@
   <div class="cmd-foot minimal">
     <label id="peToggle" class="pe-toggle keep-min"><input id="usePe" type="checkbox" checked style="width:auto" /> <span data-i18n="pe_toggle">提示词增强</span></label>
     <label id="gateToggle" class="pe-toggle keep-min"><input id="dbgGateEnabled" type="checkbox" checked style="width:auto" /> <span data-i18n="gate_toggle">人物在场检测</span></label>
+    <label class="pe-toggle keep-min"><input id="fullBodyStart" type="checkbox" style="width:auto" /> <span data-i18n="full_body_start">全身入镜</span></label>
     <label id="profToggle" class="pe-toggle keep-min"><input id="profileTimings" type="checkbox" style="width:auto" /> <span data-i18n="prof_toggle">性能分析</span></label>
     <span class="kvreset-field keep-min">
       <span data-i18n="upload_quality">上传清晰度</span>
@@ -345,6 +346,9 @@ const I18N = {
     fps_label: "发/收/显",
     pe_toggle: "提示词增强",
     gate_toggle: "人物在场检测",
+    full_body_start: "全身入镜",
+    gate_full_body: "请让头部和双脚完整入镜，然后站稳",
+    gate_full_body_unavailable: "全身检测暂不可用，请关闭该开关或检查服务",
     prof_toggle: "性能分析",
     upload_quality: "上传清晰度",
     download_quality: "下载清晰度",
@@ -407,6 +411,9 @@ const I18N = {
     fps_label: "out/in/disp",
     pe_toggle: "Prompt Enhance",
     gate_toggle: "Presence Gate",
+    full_body_start: "Full body in frame",
+    gate_full_body: "Show your head and feet, then hold still",
+    gate_full_body_unavailable: "Full-body detection unavailable; disable this option or check the server",
     prof_toggle: "Profiling",
     upload_quality: "Upload quality",
     download_quality: "Download quality",
@@ -646,6 +653,8 @@ let tickInFlight = false;
 let pePausedSend = false;
 let peDeferThisSend = false;
 let videoPullActive = false;
+let sessionFullBodyStart = false;
+let resultSourceStart = 0;
 let videoPullGeneration = 0;
 let videoPullTimer = null;
 let videoPullIdx = 0;
@@ -1583,12 +1592,12 @@ async function pullNextVideoFrame(generation) {
   const wait = ok ? Math.max(0, intervalMs - spent) : 30;
   videoPullTimer = setTimeout(() => pullNextVideoFrame(generation), wait);
 }
-function startVideoPull() {
-  if (videoPullActive) return;
+function startVideoPull(resume = false) {
+  if (videoPullActive && !resume) return;
   stopVideoPull();
   const dur = (Number.isFinite(camera.duration) && camera.duration > 0) ? camera.duration : 0;
   videoPullTotal = dur > 0 ? Math.max(1, Math.ceil(dur * videoPullFps)) : Number.MAX_SAFE_INTEGER;
-  videoPullIdx = 0;
+  if (!resume) videoPullIdx = 0;
   videoPullActive = true;
   pullNextVideoFrame(videoPullGeneration);
 }
@@ -1628,7 +1637,7 @@ async function beginSession() {
   pendingPeCacheKey = usePe ? cacheKey : null;
   let cachedEnhancedPrompt = null;
   peDeferThisSend = false;
-  if (usePe && peCache && peCache.key === cacheKey && peCache.enhanced_prompt) {
+  if (usePe && !document.getElementById("fullBodyStart").checked && peCache && peCache.key === cacheKey && peCache.enhanced_prompt) {
     cachedEnhancedPrompt = peCache.enhanced_prompt;
     showPeResult(cachedEnhancedPrompt, peCache.model);
   } else if (usePe) {
@@ -1654,6 +1663,7 @@ async function beginSession() {
     num_inference_steps: Number(document.getElementById("steps").value),
     use_pe: usePe,
     gate_enabled: faceGateDebugEnabled(),
+    full_body_start: document.getElementById("fullBodyStart").checked,
     seed: SERVER_DEFAULTS.seed,
     kv_reset_frames: Math.max(0, Math.floor(Number(document.getElementById("kvResetFrames").value) || 0)),
     output_quality: Number(downQualityUi.value),
@@ -1727,6 +1737,7 @@ async function start() {
         resetOutputDecoder();
         outputImg.style.display = outCodecH264 ? "none" : "";
         outputCanvas.style.display = outCodecH264 ? "" : "none";
+        sessionFullBodyStart = !!msg.full_body_start;
         upCodecH264 = msg.input_codec === "h264";
         resetUplinkEncoder();
         if (usingVideoFile) {
@@ -1741,7 +1752,7 @@ async function start() {
 
         if (outputWaitOverlay) outputWaitOverlay.style.display = "none";
         showOutputIdle(false);
-        if (usingVideoFile && peDeferThisSend) {
+        if (usingVideoFile && peDeferThisSend && !sessionFullBodyStart) {
           ensureOutputPlaybackTimer(true);
           startNetPingTimer();
           const generation = videoPullGeneration;
@@ -1798,7 +1809,7 @@ async function start() {
         if (usingVideoFile && peDeferThisSend && !msg.cached) {
           peDeferThisSend = false;
           try { camera.pause(); } catch (err) {}
-          startVideoPull();
+          startVideoPull(sessionFullBodyStart);
         }
         const enhanced = msg.enhanced_prompt || msg.raw_prompt || "";
         showPeResult((msg.error || msg.fallback) ? "" : enhanced, msg.model);
@@ -1859,6 +1870,8 @@ async function start() {
             off_center: { ico: "🎯", hint: t("gate_off_center") },
             settling:   { ico: "✋", hint: t("gate_settling") },
             no_face:    { ico: "👤", hint: t("gate_no_face_wait") },
+            full_body_needed: { ico: "🧍", hint: t("gate_full_body") },
+            full_body_unavailable: { ico: "⚠", hint: t("gate_full_body_unavailable") },
           };
           const m = map[R] || map.no_face;
           if (outputWaitIco) outputWaitIco.textContent = m.ico;
@@ -1869,7 +1882,10 @@ async function start() {
       }
       if (msg.type === "pe_running") {
         pePausedSend = true;
-        if (usingVideoFile) { try { camera.pause(); } catch (err) {} }
+        if (usingVideoFile) {
+          try { camera.pause(); } catch (err) {}
+          if (sessionFullBodyStart) stopVideoPull();
+        }
         outputWaitingFace = true;
         if (outputIdleOverlay) outputIdleOverlay.style.display = "none";
         if (outputWaitOverlay) outputWaitOverlay.style.display = "";
@@ -2344,15 +2360,15 @@ function startResultSync() {
   camera.muted = true;
   camera.loop = false;
   outputResult.loop = false;
-  const mirror = () => { try { camera.currentTime = outputResult.currentTime; } catch (e) {} };
+  const mirror = () => { try { camera.currentTime = resultSourceStart + outputResult.currentTime; } catch (e) {} };
   const onPlay = () => { camera.play().catch(() => {}); };
   const onPause = () => { try { camera.pause(); } catch (e) {} };
   const onRate = () => { camera.playbackRate = outputResult.playbackRate; };
   const onTimeUpdate = () => {
-    if (Math.abs(camera.currentTime - outputResult.currentTime) > 0.15) mirror();
+    if (Math.abs(camera.currentTime - resultSourceStart - outputResult.currentTime) > 0.15) mirror();
   };
   const onEnded = () => {
-    try { camera.currentTime = 0; } catch (e) {}
+    try { camera.currentTime = resultSourceStart; } catch (e) {}
     try { outputResult.currentTime = 0; } catch (e) {}
     camera.play().catch(() => {});
     outputResult.play().catch(() => {});
@@ -2365,7 +2381,7 @@ function startResultSync() {
   outputResult.addEventListener("seeked", mirror);
   outputResult.addEventListener("timeupdate", onTimeUpdate);
   outputResult.addEventListener("ended", onEnded);
-  try { camera.currentTime = 0; } catch (e) {}
+  try { camera.currentTime = resultSourceStart; } catch (e) {}
   try { outputResult.currentTime = 0; } catch (e) {}
   camera.play().catch(() => {});
   outputResult.play().catch(() => {});
@@ -2458,6 +2474,7 @@ async function fetchAndShowResult() {
 }
 function onRecordingFinalized(msg) {
   if (finalizeWatchdog) { clearTimeout(finalizeWatchdog); finalizeWatchdog = null; }
+  resultSourceStart = Math.max(0, Number(msg.source_start_s) || 0);
   lastRecId = msg.ok === false ? null : (msg.rec || null);
   if (!lastRecId) {
     finalizeIsForResult = false;
@@ -2537,7 +2554,7 @@ document.getElementById("useMaxTemporalIds").addEventListener("change", () => {
   updateMaxTemporalIdsVisibility();
   updateMetrics();
 });
-for (const id of ["width", "height", "cameraFps", "fps", "quality", "steps", "usePe", "refImage", "smoothPlayback", "targetQueueDelayMs", "maxQueueDelayMs", "kvResetFrames", "useMaxTemporalIds", "maxTemporalIds", "freezeKvOnStatic", "staticDiffThresh", "profileTimings", "dbgGateEnabled"]) {
+for (const id of ["width", "height", "cameraFps", "fps", "quality", "steps", "usePe", "refImage", "smoothPlayback", "targetQueueDelayMs", "maxQueueDelayMs", "kvResetFrames", "useMaxTemporalIds", "maxTemporalIds", "freezeKvOnStatic", "staticDiffThresh", "profileTimings", "dbgGateEnabled", "fullBodyStart"]) {
   document.getElementById(id).addEventListener("input", updateMetrics);
   document.getElementById(id).addEventListener("change", updateMetrics);
 }
@@ -2681,6 +2698,7 @@ function applyServerDefaults() {
     freezeKvOnStatic: "freeze_kv_on_static",
     usePe: "use_pe",
     dbgGateEnabled: "online_gate",
+    fullBodyStart: "full_body_start",
     profileTimings: "profile_timings",
   };
   for (const [id, key] of Object.entries(boolMap)) {
