@@ -68,7 +68,7 @@ class WebDataset(WebDatasetBase):
             for field_name in first_examples[0]:
                 extension = field_name.rsplit(".", 1)[-1]
                 if extension in self.VIDEO_EXTENSIONS:
-                    features[field_name] = datasets.Video()
+                    features[field_name] = datasets.Video(decode=False)
 
             for field_name in first_examples[0]:
                 extension = field_name.rsplit(".", 1)[-1]

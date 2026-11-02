@@ -19,7 +19,6 @@ from diffusers.models.attention import FeedForward
 from diffusers.models.embeddings import PixArtAlphaTextProjection, TimestepEmbedding, Timesteps
 from diffusers.utils import BaseOutput
 
-from src.distributed.parallel_states import sp_enabled
 
 try:
     from torch.nn.attention.flex_attention import create_block_mask, flex_attention
@@ -1017,8 +1016,6 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         return_dict: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor] | Transformer3DModelOutput:
         """Run forcing or DMD rollouts with kv_cache_mode=None; otherwise store or reuse clean-history KV."""
-        if sp_enabled():
-            raise NotImplementedError("Chunk-causal attention requires sequence parallel size 1.")
         if self_attn_input_mode not in {None, "ref_image_cache"}:
             raise ValueError(f"Unsupported cache prefill mode: {self_attn_input_mode!r}.")
         if encoder_hidden_states is None:

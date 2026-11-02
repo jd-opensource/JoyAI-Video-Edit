@@ -2,12 +2,6 @@
 
 import torch
 import torch.distributed as dist
-from src.distributed.parallel_states import get_parallel_state
-
-
-def broadcast_within_sp_group(input_: torch.Tensor):
-    src = get_parallel_state().sp_group_id * get_parallel_state().sp_size
-    dist.broadcast(input_, src=src, group=get_parallel_state().sp_group)
 
 
 def broadcast_item(item, src: int = 0):
@@ -17,3 +11,15 @@ def broadcast_item(item, src: int = 0):
     item_list = [item]
     dist.broadcast_object_list(item_list, src=src)
     return item_list[0]
+
+
+def all_ranks_finite(value: torch.Tensor) -> bool:
+    """Make the same finite-value decision on every rank before backward/step."""
+    from torch.distributed.tensor import DTensor
+
+    if isinstance(value, DTensor):
+        value = value.to_local()
+    finite = torch.isfinite(value.detach()).all().to(dtype=torch.int32)
+    if dist.is_initialized():
+        dist.all_reduce(finite, op=dist.ReduceOp.MIN)
+    return bool(finite.item())

@@ -8,14 +8,6 @@ def apply_activation_checkpointing(
     module: torch.nn.Module,
     skip_interval: int = 1
 ) -> torch.nn.Module:
-    """Apply activation checkpointing to transformer blocks."""
-    return _checkpoint_blocks_with_skip(module, skip_interval)
-
-
-def _checkpoint_blocks_with_skip(
-    module: torch.nn.Module,
-    skip_interval: int
-) -> torch.nn.Module:
     """Apply checkpointing to transformer blocks with specified skip interval."""
     if skip_interval < 1:
         raise ValueError(

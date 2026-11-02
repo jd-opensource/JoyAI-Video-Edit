@@ -26,176 +26,106 @@ def _env_int(name: str, default: int) -> int:
 
 PE_IMAGE_MAX_SIDE = _env_int("PE_IMAGE_MAX_SIDE", 768)
 
-SYSTEM_PROMPT = """# SYSTEM PERSONA
-You are an elite AI Video-to-Video (V2V) Prompt Architect. Your objective is to translate raw user
-commands and source video frame contexts into highly optimized, robust English prompts for advanced
-generative V2V models."""
+SYSTEM_PROMPT = """You write precise English instructions for video-to-video editing. Use the source
+frames to interpret the user's requested changes. Preserve the user's intent and explicit
+exceptions, and return only the final editing prompt."""
 
-V2V_TEMPLATE = """# INPUT DATA
-- Target Objective: "{user_prompt}"
-- Visual Reference: Provided source video frame.
+V2V_TEMPLATE = """# INPUT
+User request: {user_prompt}
+The provided images are SOURCE VIDEO FRAMES, showing the video to edit.
 
-# OUTPUT CONTRACT
-- Output ONLY the final finalized English prompt string, as ONE natural, cohesive paragraph — no
-  bullet points or lists, zero conversational filler, no greetings, no meta-commentary, no labels
-  (never echo section names from this instruction).
-- Grounding: Never hallucinate or describe entities, body parts, or environments that are
-  out-of-frame or occluded in the provided source video frame.
-- Typography/Text Rendering: This rule applies ONLY to text the user explicitly names in the Target
-  Objective. If the user requests specific text, logos, or characters to be written, printed, or
-  displayed on an object, you MUST keep the EXACT original string enclosed in double quotes, and
-  DO NOT translate or transliterate it (strictly preserve the original language and characters from
-  the user's prompt). Conversely, DO NOT read, transcribe, OCR, or mention any text, label, brand,
-  logo, or watermark that merely appears in the source frames but is not named in the Target
-  Objective — treat such incidental background text as ordinary unchanged pixels, never as a
-  preservation anchor.
+# OUTPUT
+Return only one cohesive English paragraph, starting with a direct editing instruction.
+Use about 60-120 words for a typical request, fewer for a simple edit. Include every requested
+change and exception; completeness takes priority over the word target. Put the main edit first,
+add only useful visual details, and end with one brief preservation clause when needed.
+No explanations, labels, lists, reasoning, generic quality claims or repeated negative commands.
 
-# EDIT PLAN
-1. Scope: Never introduce edit operations the Target Objective did not request — no
-   background/scene replacement, no art-style or medium change (anime / painting / cartoon look and
-   similar), no relighting or color grading beyond what a requested edit needs for integration, no
-   camera motion, speed changes, depth-of-field effects, or extra elements on your own initiative.
-   Preserve the source video's existing visual style and medium unless the Target Objective
-   explicitly requests changing them. Do not introduce a new style merely because the scene's
-   culture or era suggests one. Use only the recipes that match the requested task; elaborate the
-   requested edits, never add new ones.
-2. Priority: Describe the edits in the Target Objective's order of importance — the primary subject
-   edit comes FIRST and carries the most detail (for a well-known character or person, spell out
-   their canonical visual features); secondary edits such as a background swap get one concise
-   sentence each — still naming 2-3 concrete scene elements (e.g. "snow-covered pines, distant
-   mountains"), a bare category like "a snowy landscape" is not enough — and must never dominate
-   the paragraph.
-3. Completeness: Every distinct requested edit gets its own explicit sentence with concrete visual
-   detail — never merge, dilute, or drop a requested item (aging, earrings, an accessory, a named
-   garment each count as one edit).
-4. Grounding & Physics: Eradicate all ambiguous or generic descriptors — specify concrete,
-   well-known entities that match the original art style, never leave placeholder terms. For each
-   edit, describe the physical interactions and temporal consistency expected in the video
-   (tracking, deformation, shadows) to prevent artifacts.
+# SCOPE AND GROUNDING
+The user's explicit edits, exclusions and requested strength override every default below.
+Identify the combined edit scope before deciding what to preserve. Keep attributes outside that
+scope; never preserve an attribute that another requested edit changes.
+Use the source frames to identify visible targets, clothing layers, scene layout and framing.
+Do not invent source objects, hidden anatomy or occluded details, including in removal instructions.
+Newly requested objects, appearances and environments may differ from the source; describe only
+details needed to define the requested result. A broad request is not permission to add unrelated
+objects or edits.
+Keep source action, timing, camera, framing, visual medium and lighting unless the request changes
+them. Adjust only local contact, shadows or reflections needed to integrate the edit naturally.
 
-# EDIT RECIPES
-Evaluate the Target Objective to determine the task type. Use the matching recipes as the
-FOUNDATION of your prompt, and seamlessly expand them into a highly detailed, cohesive paragraph
-(DO NOT use bullet points or lists):
+# EDIT TYPES
+Use only the rules relevant to the request; combine multiple edits without dropping any of them.
 
-[Entity Manipulation & Modification]
-- Add: "Add [specific element] at [precise spatial location/action]."
-- Replace: "Replace [original element] with [specific new element]."
-- Character/Creature Replace: When the subject becomes a character, celebrity, or animal — including
-  when a named person's face replaces the subject's face — FIRST describe its head and face anatomy
-  (fur, snout, facial structure, eyes, skin) so the face visibly transforms — costume or armor alone
-  is NOT a transformation — THEN its canonical outfit/armor/props in the same sentence or the next
-  one; both halves are mandatory. The replacement's canonical look takes over the whole head:
-  original glasses and facial accessories do NOT carry over onto the new face — when the source
-  frame shows any, write this sentence verbatim: "The subject's original glasses and facial
-  accessories are removed." (see the Glasses rule below for when this is allowed).
-- Remove: "Erase [target object] from the scene, temporally inpainting the occluded areas to match
-  surrounding spatial textures and lighting."
-- Attribute Edit: "Change the [attribute] of [target entity] to [new specific state]."
+- Add, replace, remove or modify: name the target and the requested result directly. Locate new
+  elements using visible scene relationships. Express exclusions as properties of the requested
+  result; give removal instructions only for objects visible in the source. For removal, reconstruct
+  the exposed region with surrounding textures and lighting. For an attribute edit, change only
+  that attribute.
 
-[Clothing & Footwear]
-- For clothing or footwear replacement, whether one item or a complete outfit, aim for about
-  100 words in total, with one brief preservation sentence. For replacement garments, use one
-  concise tailoring clause for a naturally slender fit within the requested cut, preserving source
-  anatomy and loose styles. Attribute-only garment edits retain cut.
-- For trouser-only edits, preserve the source waistband height and the top's hem, drape and
-  overlap over the waistband; do not introduce a higher rise or tuck the top into the trousers.
-- For flared trousers, lead with fitted knees and lower legs widening smoothly to open hems
-  visibly wider than the knees; a slight flare stays subtle and tailored. Replace the source
-  leg outline, describing only the requested cut and prioritizing it over creases or waist styling.
-- For requested full-length sleeves, lead with continuous fabric from shoulders across elbows
-  and forearms to cuffs touching the hand bases; replace the source sleeve silhouette, not a layer
-  beneath it. Prioritize this construction over graphics and omit the source sleeve length.
-- For a cheongsam/qipao without an explicit cut request, describe a dress with a Mandarin collar,
-  chest frog fastenings and one continuous opaque skirt around both legs; front, back and side panels
-  stay joined to the hem during source motion. Use construction terms instead of qipao/cheongsam or
-  slit/opening terms in the final prompt. Keep requested sleeves/materials and the source crop.
-- Map the default apricot clothing/footwear color to warm off-white (near white). Throughout the
-  final prompt, replace that label with "warm off-white"; never repeat "apricot" or use beige/tan/brown
-  for this color, including material and reflection descriptions. Explicit fruit/orange hues and
-  exact color codes override this default.
+- Facial identity replacement: define the replacement using the target face and any accompanying
+  hairstyle or head/face features, excluding attributes the user explicitly retains. Treat all
+  transferred features as changed when writing the final preservation clause. Preserve source
+  clothing and body unless separately edited; do not import the target's outfit or props.
+  Attribute-only edits, such as aging or hair color, change only the requested attributes.
 
-[Global Stylization & Environment]
-- Background Replacement: "Replace the original background with [highly detailed description of the
-  new environment], ensuring the foreground elements are seamlessly integrated with matching global
-  illumination, reflections, and realistic cast shadows."
-  Inspect the original background directly behind the subject, especially visible chairs, chair
-  backs and headrests closely bordering the subject's visible outline. These objects are part of
-  the background even when they touch the subject's outline. When present within the requested
-  background replacement, their removal is MANDATORY unless the Target Objective explicitly asks
-  to keep them. Explicitly name each visible object or component in this region and state that it
-  is completely removed, so the exposed area directly behind the subject shows the new environment;
-  a generic "replace the background" instruction is not enough. Name only components actually
-  visible in the source: a visible chair back does not imply a visible headrest. When none is
-  visible, do not mention these objects at all, even in a removal or preservation clause. Make this
-  decision from the image before writing; never output "if present" or "if visible" conditions.
-  Do not add these removals to unrelated edits unless the Target Objective requests them.
-- Style Transfer: "Render the scene in the style of [Style Name], featuring [2-3 concrete visual
-  characteristics]."
-- Whole-frame Style Coverage: When the objective converts the entire video to an art style, the
-  subject's face, skin, hair, and clothing are rendered in that style too — write it explicitly
-  ("the person, including their face, is drawn/painted in the same style"). "Keep the
-  face/background unchanged" inside a style request means identity, layout, and content stay
-  recognizable WITHIN the style; NEVER write that the face or background keeps its photorealistic
-  look, and never emit phrases like "face remains unchanged", "maintaining facial features",
-  "natural skin tone", or "body language remains unchanged" anywhere in a whole-frame style
-  conversion (not even in sentences about other edits) — the ONLY allowed preservation wording is
-  "identity, pose, and layout stay recognizable within the style". When a mood-style word (e.g.
-  cyberpunk) is paired with "keep everything unchanged", realize the style as bold, clearly visible
-  lighting and color grading (e.g. neon rim light, saturated color cast) on the unchanged scene —
-  never "subtle".
-- Boundary: Replacing the background with a different environment is Background Replacement.
-  Restyling the existing background preserves its scene content and layout unless the Target
-  Objective requests content changes; changing its appearance alone does not trigger the
-  background furniture-removal rule. A whole-frame style conversion restyles both the subject
-  and background in place and follows Whole-frame Style Coverage.
-- Weather/Environment: "Add [weather/season specifics] seamlessly affecting the global scene
-  physics."
-- Lighting & Color Grading: "Apply cinematic relighting and color grading: [detailed description of
-  color temperature, volumetric light sources, and ambient hues]."
+- Whole-person, character or creature replacement: describe recognizable head/face features and
+  the visible body or outfit that define the requested replacement. A costume change alone is not
+  an identity replacement. Do not preserve source identity, clothing or anatomy that the requested
+  replacement changes, or invent extra props. Honor explicitly retained clothing and accessories.
+  For a material transformation, express retained likeness through that material, rather than
+  claiming the original skin or hair remains unchanged.
 
-[Cinematography — only when explicitly requested]
-- Camera Motion / Depth of Field / Motion Speed: "Execute camera motion: [Pan/Tilt/Zoom/Tracking
-  direction]." / "Apply sharp focus to [target subject], with optical bokeh on [elements]." /
-  "Apply [temporal speed effect] to [target action/scene]."
+- Clothing and footwear: change the requested item or layer, preserving other garments,
+  accessories and source body proportions. Fit the new garment naturally without imposing a
+  slender silhouette or changing the requested loose/tailored cut. A color-only edit retains cut.
+  Trouser-only edits retain waistband height and the top's hem, drape and overlap unless requested
+  otherwise. Describe requested sleeve length or trouser flare as a garment construction and
+  silhouette change, not an extra layer; match the requested cut and degree of flare.
+  For a qipao/cheongsam, describe its requested collar, fastenings, fabric and cut, with connected
+  panels deforming naturally. Preserve the requested slit design; default its upper endpoint to
+  near knee level unless another height is specified. Keep that endpoint fixed on the garment
+  during motion, with stable panel overlap above it. A slit is a side opening, not a raised hem;
+  omit offscreen details.
+  For an unspecified apricot clothing/footwear shade, use only "warm off-white" throughout the
+  output, never "apricot"; an explicit orange/fruit hue, color code or precise shade takes priority.
 
-[Utility & Hybrid Tasks]
-- Text & Overlay Removal: "Remove all [text overlays/watermarks/subtitles], seamlessly
-  reconstructing the occluded background textures to generate a flawless clean plate."
-- Hybrid/Complex: Blend multiple recipes naturally into ONE cohesive paragraph.
+- Background replacement: describe the requested new environment and fill the replaced regions,
+  including gaps around the subject and frame edges. Explicitly remove visible old background
+  remnants bordering the subject, such as chair backs or headrests, only when they belong to the
+  replacement scope. Name only visible components; never infer a headrest from a chair back.
+  Retain surviving foreground elements and objects the user explicitly keeps. Restyling an
+  existing background changes its appearance, not its objects or layout, unless also requested.
 
-# VISUAL ANCHORS (PRESERVATIONS)
-Anchor ONLY what the Target Objective leaves untouched — an anchor must never contradict the
-requested edit, and preservation statements must never conflict with the Target Objective. Decide
-by case:
-- Background replaced: do not preserve original background objects within the replacement scope
-  unless the Target Objective explicitly keeps them. Original objects directly behind the subject,
-  including visible chairs, chair backs and headrests along the subject's outline, remain part of
-  the background; explicitly remove them under the Background Replacement rule. The new
-  environment must fill all replaced regions, including visible gaps around the subject and frame
-  edges. Anchor only surviving foreground elements and objects the user explicitly keeps, and
-  describe only source objects actually visible in the provided frame.
-- Background untouched: when no requested edit affects the background, preserve its scene content,
-  spatial layout and visual appearance. State that the background remains unchanged; do not invent
-  or substitute a new environment.
-- Background appearance edited without scene replacement: for requested full-frame or
-  background-only stylization, weather/season changes, lighting, color grading or depth-of-field
-  changes, preserve the original scene's objects and spatial layout except for requested content
-  changes. Apply the requested visual changes to all affected background regions. Do not call the
-  background "unchanged" or preserve its original rendering, lighting, colors or focus when those
-  attributes are being edited. For whole-frame art-style conversion, use the preservation wording
-  in Whole-frame Style Coverage; otherwise state which scene content/layout stays and which visual
-  attributes change. Apply effects only within the requested scope; respect explicit exclusions.
-- Subject replaced or transformed: do not anchor the subject's original clothing or body — anchor
-  only pose, motion, and what the objective explicitly keeps. When the subject turns into a
-  different material or character, express likeness as part of the transformation ("an ice
-  sculpture OF the person, reproducing their pose and features in ice"), NEVER as a preservation
-  statement like "their hair and facial features remain unchanged".
-- Glasses: The sentence "The subject's original glasses and facial accessories are removed." may
-  appear ONLY when the subject's face or body is replaced by another person, character, or
-  creature. Any edit that merely modifies the subject (aging, beard, mask, clothing, hairstyle,
-  style, background) keeps their glasses — do not mention the glasses at all unless the Target
-  Objective names them.
+- Style, weather, lighting, color grading or focus: apply only the requested effect to the requested
+  regions and at the requested strength. A whole-frame style change includes the subject and
+  background except explicit exclusions, such as retaining a photorealistic face. Preserve
+  recognizable identity, action and scene layout within styled regions without claiming their
+  original rendering stays unchanged. A style request with "keep everything unchanged" preserves
+  scene content and layout while changing the requested appearance. Do not force dramatic effects
+  when the user asks for a subtle change.
+
+- Camera or speed: change camera motion, framing, depth of field or action speed only when
+  requested. Keep the remaining source motion and scene behavior.
+
+# TEXT
+When the user specifies text or a logo to render, preserve the exact supplied string in double
+quotes, including its original language, characters and spelling, whether or not the user quoted
+it. Do not translate or transliterate it. Do not transcribe, describe or anchor incidental source
+text, labels, brands or watermarks unless requested. For text/overlay removal, identify the
+requested removal scope without unnecessarily copying its wording.
+
+# VIDEO CONSISTENCY AND FRAMING
+Describe the edited result as already present in the first output frame, unless the user requests
+a gradual transformation or a timed appearance. Follow the corresponding source frames' motion
+rather than freezing the person in the provided frame's pose. Keep coherent tracking, scale,
+occlusion and relevant garment deformation, contact, shadows or reflections.
+Respect the source crop; do not zoom out, reveal hidden body parts or force a full-body view to
+show the edit. A complete outfit request still applies to the entire outfit as it becomes visible
+during source motion. Describe currently visible details without inventing offscreen features.
+Write the final preservation clause against the edited result: exclude source appearances
+replaced, covered or transformed by the edit. Retain unaffected motion and structure without
+restoring their old appearance. If the background is unaffected, briefly state that it stays
+unchanged; otherwise preserve only its unaffected attributes.
 """
 
 RV2V_SYSTEM_PROMPT = """You write precise English instructions for reference-image-guided video
@@ -454,3 +384,156 @@ class PromptEnhancer:
         except Exception as exc:
             logger.warning("PE failed: %s; using raw prompt", type(exc).__name__)
             return user_prompt
+
+
+MIMO_PERSON_SYSTEM_PROMPT = """You write concise English captions for reference-guided person replacement in a video.
+Image 0 is the reference person. Image 1 is a frame of the source video to edit.
+Return ONLY one direct editing sentence, about 20-40 words, in this format:
+Replace [brief identification of the source person] with the person from image0, featuring [2-3 distinctive visible reference features].
+Use reference hair, clothing and accessories to identify the requested appearance. Do not invent details.
+Preserve every explicitly requested exception or extra edit. Do not add edits, framing changes, reference pose, or reference body proportions. Do not describe background or lighting unless the user requests changing them.
+The source video supplies pose, motion and shoulder silhouette; this is an editing instruction, not a new scene description.
+No explanation, reasoning, markdown, labels, or generic quality/preservation paragraph."""
+
+MIMO_MODEL = "MiMo-VL-7B-RL-2508"
+
+
+def pe_available(backend):
+    return backend == "mimo" or bool(os.environ.get("OPENAI_API_KEY"))
+
+
+def pe_model_name(backend, model=None):
+    return MIMO_MODEL if backend == "mimo" else model or os.environ.get("PE_MODEL") or DEFAULT_MODEL
+
+
+def _person_replacement(prompt):
+    """Use the short template only for an explicit whole-person replacement."""
+    text = prompt.lower()
+    if re.search(r"(?:不要|别|勿|do not|don't|never)[^，。,.!;\n]*(?:换人|替换|换成|replace|swap)", text):
+        return False
+    scopes = re.findall(r"\b(?:replace|swap)\s+(.+?)\s+(?:with|by|for)\s+", text)
+    scopes += re.findall(r"([^，。！？;\n]+?)(?:替换成|替换为|换成|变成)", text)
+    for scope in scopes:
+        if re.search(r"衣|服|裤|裙|帽|眼镜|头发|发型|脸|背景|颜色|\b(?:clothes|clothing|outfit|shirt|top|dress|jacket|pants|trousers|hat|hair|face|background|color)\b", scope):
+            continue
+        if re.search(r"人物|主角|男人|女人|男孩|女孩|人|我|\b(?:person|people|man|woman|girl|boy|subject|character|actor|individual|me)\b", scope):
+            return True
+    return text.strip() in {"换人", "替换人物", "person replacement", "swap person"}
+
+
+def _mimo_prompt(task_type, user_prompt):
+    if task_type == "rv2v":
+        if _person_replacement(user_prompt):
+            return MIMO_PERSON_SYSTEM_PROMPT, "User request: " + user_prompt, "person_short", 128
+        return RV2V_SYSTEM_PROMPT, RV2V_TEMPLATE.format(user_prompt=user_prompt), "rv2v", 384
+    return SYSTEM_PROMPT, V2V_TEMPLATE.format(user_prompt=user_prompt), "v2v", 384
+
+
+class MimoPromptEnhancer:
+    """Use the runtime's existing generator; never load a second set of weights."""
+
+    model = MIMO_MODEL
+
+    def __init__(self, pipeline, lock):
+        if pipeline is None or lock is None:
+            raise ValueError("Local PE requires a loaded pipeline and its inference lock")
+        self.pipeline = pipeline
+        self.lock = lock
+        self.template = None
+
+    def _generate(self, task_type, user_prompt, video, ref_image, stop, deadline):
+        import time
+        import torch
+        from transformers import StoppingCriteria, StoppingCriteriaList
+
+        class Stop(StoppingCriteria):
+            def __call__(self, input_ids, scores, **kwargs):
+                return stop.is_set() or time.monotonic() >= deadline
+
+        def image(item):
+            if isinstance(item, tuple):
+                item = item[0]
+            if isinstance(item, str):
+                with Image.open(item) as im:
+                    return _downscale(im.convert("RGB"))
+            if not isinstance(item, Image.Image):
+                raise TypeError("Local PE expects PIL images or local image paths")
+            return _downscale(item.convert("RGB"))
+
+        frames = video if isinstance(video, list) else ([video] if video is not None else [])
+        images = [image(item) for item in frames]
+        if task_type == "rv2v":
+            if ref_image is None:
+                raise ValueError("Reference editing PE requires a reference image")
+            images.insert(0, image(ref_image))
+        system, text, self.template, max_tokens = _mimo_prompt(task_type, user_prompt)
+        content = [{"type": "text", "text": text}]
+        for i in range(len(images)):
+            content.extend([{"type": "text", "text": f"\n[Image {i}]:"}, {"type": "image"}])
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
+        if not self.lock.acquire(timeout=max(0, deadline - time.monotonic())):
+            raise TimeoutError("Local PE timed out waiting for the encoder")
+        try:
+            if stop.is_set() or time.monotonic() >= deadline:
+                raise TimeoutError("Local PE cancelled before generation")
+            model, processor = self.pipeline.text_encoder, self.pipeline.qwen_processor
+            device = self.pipeline._execution_device
+            rendered = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            rendered += "<think>\n\n</think>\n\n"
+            inputs = processor(text=[rendered], images=images or None, padding=True,
+                               return_tensors="pt").to(device)
+            rope_owner = getattr(model, "model", model)
+            has_rope = hasattr(rope_owner, "rope_deltas")
+            old_rope = getattr(rope_owner, "rope_deltas", None)
+            try:
+                from xvideo.serving.pe_aoti import generate_mimo_aoti
+                with torch.inference_mode():
+                    tokens = generate_mimo_aoti(
+                        model, inputs, max_tokens,
+                        lambda: stop.is_set() or time.monotonic() >= deadline,
+                    )
+                    self.decoder = "aoti" if tokens is not None else "eager"
+                    if tokens is None:
+                        output = model.generate(
+                            **inputs, max_new_tokens=max_tokens, do_sample=False, use_cache=True,
+                            disable_compile=True,
+                            stopping_criteria=StoppingCriteriaList([Stop()]),
+                        )
+                        tokens = output[0, inputs.input_ids.shape[1]:].cpu()
+            finally:
+                if has_rope:
+                    rope_owner.rope_deltas = old_rope
+            if stop.is_set() or time.monotonic() >= deadline:
+                raise TimeoutError("Local PE exceeded its generation deadline")
+            eos = model.generation_config.eos_token_id
+            eos = [eos] if isinstance(eos, int) else (eos or [])
+            if tokens.numel() >= max_tokens and int(tokens[-1]) not in eos:
+                raise ValueError("Local PE output was truncated")
+            text = processor.tokenizer.decode(tokens, skip_special_tokens=True).strip()
+            if not text or "<think" in text.lower() or "</think" in text.lower():
+                raise ValueError("Local PE returned reasoning instead of an editing prompt")
+            return _sanitize_enhanced(text, user_prompt)
+        finally:
+            self.lock.release()
+
+    async def enhance(self, task_type, user_prompt, video=None, ref_image=None, *, timeout=90.0):
+        import threading
+        import time
+
+        if not user_prompt or not user_prompt.strip():
+            return user_prompt
+        stop = threading.Event()
+        worker = asyncio.create_task(asyncio.to_thread(
+            self._generate, task_type, user_prompt, video, ref_image, stop, time.monotonic() + timeout,
+        ))
+        try:
+            return await asyncio.wait_for(asyncio.shield(worker), timeout=timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            stop.set()
+            # CUDA work cannot be killed mid-kernel. Drain before handing this
+            # same encoder back to video generation or another session.
+            try:
+                await asyncio.shield(worker)
+            except Exception:
+                pass
+            raise

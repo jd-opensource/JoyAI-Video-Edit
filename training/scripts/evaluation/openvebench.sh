@@ -11,7 +11,7 @@ DATASET_ROOT="${DATASET_ROOT:-data/OpenVE-Bench}"
 CSV_PATH="${CSV_PATH:-${DATASET_ROOT}/benchmark_videos.csv}"
 TASK_TYPES="${TASK_TYPES:-global_style,background_change,local_change,local_remove,local_add}"
 SAVE="${SAVE:-outputs_eval/openvebench}"
-NODE_RANK="${NODE_RANK:-${RANK:-0}}"
+NODE_RANK="${NODE_RANK:-0}"
 NEG_PROMPT="An abstract, computer-generated scene with distorted and blurry visuals. A deformed, disfigured figure without specific features, depicted as an illustration. The background is a collage of grainy textures and striped patterns, lacking clear visual content. The figure moves minimally with weak dynamics and a stuttering effect, displaying distorted and erratic motions. The style incorporates extremely high contrast and extremely high sharpness, combined with low-quality imagery, grainy effects, and includes logos and text elements. The camera employs disjointed and stuttering movements, inconsistent framing, and unstructured composition."
 
 EXTRA_ARGS=()
@@ -31,7 +31,7 @@ fi
 export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
 torchrun \
-    --nnodes "${NNODES:-${WORLD_SIZE:-1}}" \
+    --nnodes "${NNODES:-1}" \
     --nproc_per_node "${GPUS_PER_NODE:-8}" \
     --node_rank "$NODE_RANK" \
     --master_addr "${MASTER_ADDR:-127.0.0.1}" \

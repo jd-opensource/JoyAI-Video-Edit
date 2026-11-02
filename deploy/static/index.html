@@ -254,8 +254,8 @@
   </div>
   <div class="cmd-foot minimal">
     <label id="peToggle" class="pe-toggle keep-min"><input id="usePe" type="checkbox" checked style="width:auto" /> <span data-i18n="pe_toggle">提示词增强</span></label>
-    <label id="gateToggle" class="pe-toggle keep-min"><input id="dbgGateEnabled" type="checkbox" checked style="width:auto" /> <span data-i18n="gate_toggle">人物在场检测</span></label>
-    <label class="pe-toggle keep-min"><input id="fullBodyStart" type="checkbox" style="width:auto" /> <span data-i18n="full_body_start">全身入镜</span></label>
+    <label id="gateToggle" class="pe-toggle keep-min"><input id="faceDetection" type="checkbox" checked style="width:auto" /> <span data-i18n="face_detection">人脸检测</span></label>
+    <label class="pe-toggle keep-min"><input id="fullBodyDetection" type="checkbox" style="width:auto" /> <span data-i18n="full_body_detection">全身检测</span></label>
     <label id="profToggle" class="pe-toggle keep-min"><input id="profileTimings" type="checkbox" style="width:auto" /> <span data-i18n="prof_toggle">性能分析</span></label>
     <span class="kvreset-field keep-min">
       <span data-i18n="upload_quality">上传清晰度</span>
@@ -345,8 +345,9 @@ const I18N = {
     disp_label: "显示延迟",
     fps_label: "发/收/显",
     pe_toggle: "提示词增强",
-    gate_toggle: "人物在场检测",
-    full_body_start: "全身入镜",
+    face_detection: "人脸检测",
+    full_body_detection: "全身检测",
+    gate_face_unavailable: "面部检测暂不可用，请关闭检测或检查服务",
     gate_full_body: "请让头部和双脚完整入镜，然后站稳",
     gate_full_body_unavailable: "全身检测暂不可用，请关闭该开关或检查服务",
     prof_toggle: "性能分析",
@@ -410,8 +411,9 @@ const I18N = {
     disp_label: "Display lag",
     fps_label: "out/in/disp",
     pe_toggle: "Prompt Enhance",
-    gate_toggle: "Presence Gate",
-    full_body_start: "Full body in frame",
+    face_detection: "Face detection",
+    full_body_detection: "Full-body detection",
+    gate_face_unavailable: "Face detection unavailable; disable detection or check the server",
     gate_full_body: "Show your head and feet, then hold still",
     gate_full_body_unavailable: "Full-body detection unavailable; disable this option or check the server",
     prof_toggle: "Profiling",
@@ -648,12 +650,12 @@ let stream = null;
 let videoFileUrl = null;
 let terminalHold = false;
 let usingVideoFile = false;
+const sourceDetectionModes = { camera: "near", file: "off" };
 let timer = null;
 let tickInFlight = false;
 let pePausedSend = false;
 let peDeferThisSend = false;
 let videoPullActive = false;
-let sessionFullBodyStart = false;
 let resultSourceStart = 0;
 let videoPullGeneration = 0;
 let videoPullTimer = null;
@@ -1578,7 +1580,7 @@ async function pullNextVideoFrame(generation) {
   }
   const frameStartMs = Date.now();
   const intervalMs = 1000 / Math.max(1, videoPullFps);
-  if (backendPendingFrames() >= MAX_BACKEND_PENDING_FRAMES) {
+  if (backendPendingFrames() >= (peDeferThisSend ? 1 : MAX_BACKEND_PENDING_FRAMES)) {
     videoPullTimer = setTimeout(() => pullNextVideoFrame(generation), 30);
     return;
   }
@@ -1637,7 +1639,7 @@ async function beginSession() {
   pendingPeCacheKey = usePe ? cacheKey : null;
   let cachedEnhancedPrompt = null;
   peDeferThisSend = false;
-  if (usePe && !document.getElementById("fullBodyStart").checked && peCache && peCache.key === cacheKey && peCache.enhanced_prompt) {
+  if (usePe && !document.getElementById("fullBodyDetection").checked && peCache && peCache.key === cacheKey && peCache.enhanced_prompt) {
     cachedEnhancedPrompt = peCache.enhanced_prompt;
     showPeResult(cachedEnhancedPrompt, peCache.model);
   } else if (usePe) {
@@ -1662,8 +1664,7 @@ async function beginSession() {
     height,
     num_inference_steps: Number(document.getElementById("steps").value),
     use_pe: usePe,
-    gate_enabled: faceGateDebugEnabled(),
-    full_body_start: document.getElementById("fullBodyStart").checked,
+    detection_mode: detectionMode(),
     seed: SERVER_DEFAULTS.seed,
     kv_reset_frames: Math.max(0, Math.floor(Number(document.getElementById("kvResetFrames").value) || 0)),
     output_quality: Number(downQualityUi.value),
@@ -1673,7 +1674,6 @@ async function beginSession() {
   };
   if (usingVideoFile) {
     startPayload.source = "file";
-    startPayload.gate_enabled = false;
   }
   if (cachedEnhancedPrompt) startPayload.enhanced_prompt = cachedEnhancedPrompt;
   if (refImage) startPayload.ref_image = refImage;
@@ -1737,7 +1737,6 @@ async function start() {
         resetOutputDecoder();
         outputImg.style.display = outCodecH264 ? "none" : "";
         outputCanvas.style.display = outCodecH264 ? "" : "none";
-        sessionFullBodyStart = !!msg.full_body_start;
         upCodecH264 = msg.input_codec === "h264";
         resetUplinkEncoder();
         if (usingVideoFile) {
@@ -1752,15 +1751,7 @@ async function start() {
 
         if (outputWaitOverlay) outputWaitOverlay.style.display = "none";
         showOutputIdle(false);
-        if (usingVideoFile && peDeferThisSend && !sessionFullBodyStart) {
-          ensureOutputPlaybackTimer(true);
-          startNetPingTimer();
-          const generation = videoPullGeneration;
-          await seekVideoTo(0);
-          if (generation === videoPullGeneration) await sendCurrentVideoFrame(0, generation);
-        } else {
-          startFrameTimer();
-        }
+        startFrameTimer();
         if (usingVideoFile) updateUploadProgress();
         return;
       }
@@ -1809,7 +1800,7 @@ async function start() {
         if (usingVideoFile && peDeferThisSend && !msg.cached) {
           peDeferThisSend = false;
           try { camera.pause(); } catch (err) {}
-          startVideoPull(sessionFullBodyStart);
+          startVideoPull(true);
         }
         const enhanced = msg.enhanced_prompt || msg.raw_prompt || "";
         showPeResult((msg.error || msg.fallback) ? "" : enhanced, msg.model);
@@ -1849,10 +1840,16 @@ async function start() {
         pendingOutputMeta = null;
         if (outputIdleOverlay) outputIdleOverlay.style.display = "none";
         if (outputWaitOverlay) outputWaitOverlay.style.display = "";
-        const _noFace = (msg.reason === "no_face");
-        if (outputWaitIco) outputWaitIco.textContent = _noFace ? "🙈" : "🚫";
-        const _hint = _noFace ? t("hint_no_face") : t("hint_no_person");
-        if (outputWaitHint) outputWaitHint.textContent = _hint;
+        const hints = {
+          no_face: { ico: "🙈", hint: t("hint_no_face") },
+          no_person: { ico: "🚫", hint: t("hint_no_person") },
+          full_body_needed: { ico: "🧍", hint: t("gate_full_body") },
+          full_body_unavailable: { ico: "⚠", hint: t("gate_full_body_unavailable") },
+          face_unavailable: { ico: "⚠", hint: t("gate_face_unavailable") },
+        };
+        const hint = hints[msg.reason] || hints.no_person;
+        if (outputWaitIco) outputWaitIco.textContent = hint.ico;
+        if (outputWaitHint) outputWaitHint.textContent = hint.hint;
         waitHintReason = msg.reason || "no_person"; waitHintAt = Date.now();
         return;
       }
@@ -1870,6 +1867,7 @@ async function start() {
             off_center: { ico: "🎯", hint: t("gate_off_center") },
             settling:   { ico: "✋", hint: t("gate_settling") },
             no_face:    { ico: "👤", hint: t("gate_no_face_wait") },
+            face_unavailable: { ico: "⚠", hint: t("gate_face_unavailable") },
             full_body_needed: { ico: "🧍", hint: t("gate_full_body") },
             full_body_unavailable: { ico: "⚠", hint: t("gate_full_body_unavailable") },
           };
@@ -1884,7 +1882,7 @@ async function start() {
         pePausedSend = true;
         if (usingVideoFile) {
           try { camera.pause(); } catch (err) {}
-          if (sessionFullBodyStart) stopVideoPull();
+          stopVideoPull();
         }
         outputWaitingFace = true;
         if (outputIdleOverlay) outputIdleOverlay.style.display = "none";
@@ -2238,7 +2236,7 @@ function handleVideoFileChange(event) {
   }
   if (videoFileUrl) { try { URL.revokeObjectURL(videoFileUrl); } catch (err) {} }
   videoFileUrl = URL.createObjectURL(file);
-  usingVideoFile = true;
+  switchDetectionSource(true);
   camera.srcObject = null;
   camera.classList.add("no-mirror");
   camera.src = videoFileUrl;
@@ -2299,7 +2297,7 @@ function switchToCamera() {
   clearResultVideo();
   blankOutputPane();
   showOutputIdle(true);
-  usingVideoFile = false;
+  switchDetectionSource(false);
   camera.classList.remove("no-mirror");
   if (videoFileUrl) { try { URL.revokeObjectURL(videoFileUrl); } catch (err) {} }
   videoFileUrl = null;
@@ -2554,7 +2552,7 @@ document.getElementById("useMaxTemporalIds").addEventListener("change", () => {
   updateMaxTemporalIdsVisibility();
   updateMetrics();
 });
-for (const id of ["width", "height", "cameraFps", "fps", "quality", "steps", "usePe", "refImage", "smoothPlayback", "targetQueueDelayMs", "maxQueueDelayMs", "kvResetFrames", "useMaxTemporalIds", "maxTemporalIds", "freezeKvOnStatic", "staticDiffThresh", "profileTimings", "dbgGateEnabled", "fullBodyStart"]) {
+for (const id of ["width", "height", "cameraFps", "fps", "quality", "steps", "usePe", "refImage", "smoothPlayback", "targetQueueDelayMs", "maxQueueDelayMs", "kvResetFrames", "useMaxTemporalIds", "maxTemporalIds", "freezeKvOnStatic", "staticDiffThresh", "profileTimings", "faceDetection", "fullBodyDetection"]) {
   document.getElementById(id).addEventListener("input", updateMetrics);
   document.getElementById(id).addEventListener("change", updateMetrics);
 }
@@ -2673,9 +2671,31 @@ function autoQualityTick() {
     highlightQTier("auto");
   }
 }
-function faceGateDebugEnabled() {
-  const el = document.getElementById("dbgGateEnabled");
+function faceDetectionEnabled() {
+  const el = document.getElementById("faceDetection");
   return !el || el.checked;
+}
+function detectionMode() {
+  if (document.getElementById("fullBodyDetection").checked) return "full";
+  return faceDetectionEnabled() ? "near" : "off";
+}
+function setDetectionMode(mode) {
+  document.getElementById("faceDetection").checked = mode === "near";
+  document.getElementById("fullBodyDetection").checked = mode === "full";
+}
+function switchDetectionSource(fileInput) {
+  sourceDetectionModes[usingVideoFile ? "file" : "camera"] = detectionMode();
+  usingVideoFile = fileInput;
+  setDetectionMode(sourceDetectionModes[fileInput ? "file" : "camera"]);
+}
+for (const id of ["faceDetection", "fullBodyDetection"]) {
+  document.getElementById(id).addEventListener("change", () => {
+    const input = document.getElementById(id);
+    if (input.checked) setDetectionMode(id === "faceDetection" ? "near" : "full");
+    sourceDetectionModes[usingVideoFile ? "file" : "camera"] = detectionMode();
+    invalidatePeSource();
+    updateMetrics();
+  });
 }
 function applyServerDefaults() {
   const d = SERVER_DEFAULTS || {};
@@ -2697,14 +2717,14 @@ function applyServerDefaults() {
   const boolMap = {
     freezeKvOnStatic: "freeze_kv_on_static",
     usePe: "use_pe",
-    dbgGateEnabled: "online_gate",
-    fullBodyStart: "full_body_start",
     profileTimings: "profile_timings",
   };
   for (const [id, key] of Object.entries(boolMap)) {
     const v = d[key];
     if (v !== null && v !== undefined) document.getElementById(id).checked = !!v;
   }
+  sourceDetectionModes.camera = d.detection_mode || "near";
+  setDetectionMode(sourceDetectionModes[usingVideoFile ? "file" : "camera"]);
   const maxIds = d.max_temporal_ids;
   if (maxIds !== undefined) {
     document.getElementById("useMaxTemporalIds").checked = maxIds !== null;

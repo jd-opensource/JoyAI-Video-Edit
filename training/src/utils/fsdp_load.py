@@ -62,6 +62,8 @@ def maybe_load_fsdp_model(
     pin_cpu_memory: bool = True,
 ) -> nn.Module:
     """Apply FSDP when the distributed world size exceeds one."""
+    if hsdp_shard_dim <= 0:
+        raise ValueError("hsdp_shard_dim must be positive.")
     mp_policy = MixedPrecisionPolicy(param_dtype,
                                      reduce_dtype,
                                      output_dtype,

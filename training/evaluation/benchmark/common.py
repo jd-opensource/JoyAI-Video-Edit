@@ -15,13 +15,18 @@ import torch
 import torch.distributed as dist
 from tqdm import tqdm
 
-from src.config import DEFAULT_VIDEO_RESOLUTION, VAE_SPATIAL_FACTOR, VAE_TEMPORAL_FACTOR, load_config_class_from_pyfile
-from src.distributed.parallel_states import clean_dist_env, get_parallel_state, init_distributed_environment_and_sequence_parallel
+from src.config import DEFAULT_VIDEO_RESOLUTION, VAE_TEMPORAL_FACTOR, load_config_class_from_pyfile, scale_spatial_buckets
+from src.distributed.parallel_states import clean_dist_env, init_distributed_environment
 from src.models import load_dit, load_pipeline
-from src.utils import _dynamic_resize_from_bucket, _resolve_full_length_target_frames, extract_video_tensor, save_video, seed_everything
+from src.dataset.bucket_util import BucketGroup, resize_pixels
+from src.utils import _resolve_full_length_target_frames, extract_video_tensor, save_video, seed_everything
 
 
-RESOLUTIONS = {480: (480, 832), 720: DEFAULT_VIDEO_RESOLUTION, 736: (736, 1280)}
+RESOLUTIONS = {480: (480, 840), 720: DEFAULT_VIDEO_RESOLUTION}
+
+
+def parse_temporal_id_ceiling(value: str) -> int | None:
+    return None if value.lower() == "none" else int(value)
 
 
 @dataclass(frozen=True)
@@ -44,10 +49,9 @@ def build_parser(description: str, num_frames: int) -> argparse.ArgumentParser:
     parser.add_argument("--source-guidance-scale", type=float, default=1.0)
     parser.add_argument("--neg-prompt", default="")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--sp-size", type=int, default=1)
     parser.add_argument("--max-items", type=int, default=None)
-    parser.add_argument("--use-relative-rope", action="store_true")
-    parser.add_argument("--max-temporal-ids", type=int, default=8, help="Temporal RoPE ceiling when relative RoPE is enabled.")
+    parser.add_argument("--use-relative-rope", action="store_true", help="Use dense window positions when no temporal ceiling is set.")
+    parser.add_argument("--max-temporal-ids", type=parse_temporal_id_ceiling, default=8, help="Temporal RoPE ceiling, independent of relative RoPE; use none to disable.")
     parser.add_argument(
         "--store-clean-only-self", action=argparse.BooleanOptionalAction, default=True,
         help="Store clean history chunks with isolated self-attention (default: enabled).",
@@ -174,19 +178,15 @@ def load_reference_video(video_path: Path, cfg, resolution: int, num_frames: int
     available_frames = _resolve_full_length_target_frames(total_frames, source_fps, target_fps)
     sampling_frames = min(num_frames, available_frames)
     sampling_frames = (sampling_frames - 1) // VAE_TEMPORAL_FACTOR * VAE_TEMPORAL_FACTOR + 1
-    resize_kwargs = dict(
-        bucket_configs=None,
-        vid_basesizes=[RESOLUTIONS[resolution]],
-        num_frames=sampling_frames,
-        prioritize_frame_matching=cfg.prioritize_frame_matching,
-        multiple_vides=True,
-        spatial_multiple=VAE_SPATIAL_FACTOR,
-    )
+    buckets = [
+        (1, 2, sampling_frames, height, width)
+        for height, width in scale_spatial_buckets(RESOLUTIONS[resolution])
+    ]
     first_frame = _get_video_batch(reader, [0])
-    _, bucket = _dynamic_resize_from_bucket(first_frame, return_bucket=True, **resize_kwargs)
+    bucket = BucketGroup(buckets).find_best_bucket((2, sampling_frames, *first_frame.shape[-2:]))
     frame_indices = _build_deterministic_frame_indices(total_frames, bucket[2], source_fps, target_fps)
     pixels = _get_video_batch(reader, frame_indices)
-    pixels = _dynamic_resize_from_bucket(pixels, **resize_kwargs).clamp(0, 255).to(torch.uint8).cpu()
+    pixels = resize_pixels(pixels, *bucket[-2:]).clamp(0, 255).to(torch.uint8).cpu()
     normalized = pixels.to(torch.float32).div(127.5).sub(1.0).permute(1, 0, 2, 3).unsqueeze(0)
     return normalized, pixels, bucket
 
@@ -217,57 +217,49 @@ def build_pipeline_kwargs(item, args, cfg, generator):
         max_sequence_length=cfg.text_token_max_length,
         use_vit=cfg.use_vit,
         use_relative_temporal_ids=args.use_relative_rope,
+        max_temporal_ids=args.max_temporal_ids,
         store_clean_only_self=args.store_clean_only_self,
     )
-    if args.use_relative_rope:
-        kwargs["max_temporal_ids"] = args.max_temporal_ids
     return kwargs, pixels
 
 
 def run_inference(args, items: list[BenchmarkItem]) -> None:
-    if args.sp_size <= 0 or args.num_frames <= 0:
-        raise ValueError("Sequence parallel size and frame count must be positive.")
+    if args.num_frames <= 0:
+        raise ValueError("Frame count must be positive.")
     if args.max_items is not None:
         if args.max_items < 0:
             raise ValueError("`max_items` must be non-negative.")
         items = items[:args.max_items]
     cfg = load_config_class_from_pyfile(args.config)()
     cfg.dit_ckpt = args.ckpt_path
-    cfg.hsdp_shard_dim = 1
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
-    init_distributed_environment_and_sequence_parallel(args.sp_size)
+    init_distributed_environment()
     try:
-        state = get_parallel_state()
-        data_rank = state.global_rank // args.sp_size
-        data_size = state.world_size // args.sp_size
-        is_writer = state.global_rank % args.sp_size == 0
+        data_rank = dist.get_rank()
+        data_size = dist.get_world_size()
         seed_everything(args.seed)
-        model = load_dit(cfg, device=device)
+        model = load_dit(cfg, device=device, use_fsdp=False)
         model.config.use_inference_kv_cache = True
         model.requires_grad_(False)
         model.eval()
         pipeline = load_pipeline(cfg, model, device)
         pipeline.set_progress_bar_config(disable=True)
         assigned = items[data_rank::data_size]
-        for item in tqdm(assigned, desc=f"rank {data_rank}", disable=not is_writer):
+        for item in tqdm(assigned, desc=f"rank {data_rank}", disable=data_rank != 0):
             output_dir = args.save_path / "fullset" / item.category
             result_path = output_dir / f"{item.video_path.stem}.mp4"
-            skip = [result_path.exists() if is_writer else None]
-            if args.sp_size > 1:
-                dist.broadcast_object_list(skip, src=data_rank * args.sp_size, group=state.sp_group)
-            if skip[0]:
+            if result_path.exists():
                 continue
             generator = torch.Generator(device=device).manual_seed(args.seed)
             pipeline_kwargs, source_pixels = build_pipeline_kwargs(item, args, cfg, generator)
             with torch.inference_mode():
                 result = pipeline(**pipeline_kwargs)
-            if is_writer:
-                output_dir.mkdir(parents=True, exist_ok=True)
-                save_video(extract_video_tensor(result[0, -1]), str(result_path), fps=cfg.fps)
-                save_video(extract_video_tensor(source_pixels), str(output_dir / f"{item.video_path.stem}_src.mp4"), fps=cfg.fps)
-                (output_dir / f"{item.video_path.stem}_prompt.txt").write_text(item.prompt, encoding="utf-8")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            save_video(extract_video_tensor(result[0, -1]), str(result_path), fps=cfg.fps)
+            save_video(extract_video_tensor(source_pixels), str(output_dir / f"{item.video_path.stem}_src.mp4"), fps=cfg.fps)
+            (output_dir / f"{item.video_path.stem}_prompt.txt").write_text(item.prompt, encoding="utf-8")
         dist.barrier()
     finally:
         clean_dist_env()

@@ -1,4 +1,3 @@
-import glob
 from pathlib import Path
 
 import torch
@@ -9,7 +8,6 @@ from torch.distributed.checkpoint.state_dict import (StateDictOptions,
                                                      set_optimizer_state_dict)
 from torch.distributed.fsdp import FSDPModule
 from torchdata.stateful_dataloader import StatefulDataLoader
-from src.distributed.parallel_states import get_parallel_state
 from src.utils.logging import get_logger
 
 _SAVE_OPTIONS = StateDictOptions(full_state_dict=True, cpu_offload=True)
@@ -29,7 +27,7 @@ def save_checkpoint(
 ) -> None:
     logger = get_logger()
 
-    save_path = Path(save_dir / f"global_step{step}")
+    save_path = Path(save_dir) / f"global_step{step}"
     save_path.mkdir(parents=True, exist_ok=True)
 
     state_dict = {
@@ -51,7 +49,7 @@ def save_checkpoint(
         torch.save(state_dict, ckpt_path)
 
     if dataloader is not None:
-        save_path = Path(save_path / f'dataloader')
+        save_path = save_path / 'dataloader'
         save_path.mkdir(parents=True, exist_ok=True)
         dataloader_path = save_path / \
             f"dataloader_step{step}_rank{global_rank}.pth"
@@ -72,20 +70,20 @@ def load_checkpoint(
     if isinstance(path, str):
         path = Path(path)
 
-    if path.name.endswith('pth'):
+    if path.suffix == '.pth':
         checkpoint_path = path
         path = path.parent
     else:
-        ckpt_paths = glob.glob(str(path / "*.pth"))
+        ckpt_paths = sorted(path.glob("*.pth"))
         if len(ckpt_paths) < 1:
             raise FileNotFoundError(f"Checkpoint {path} does not exist.")
-        checkpoint_path = Path(ckpt_paths[0])
+        checkpoint_path = ckpt_paths[0]
 
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint {path} does not exist.")
 
     logger.info(f"Loading checkpoint from {checkpoint_path}")
-    state_dict = torch.load(checkpoint_path, map_location="cpu")
+    state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
 
     set_model_state_dict(model, state_dict["model"], options=_LOAD_OPTIONS)
 
@@ -98,12 +96,12 @@ def load_checkpoint(
 
     dataloader_path = Path(path / "dataloader")
     if dataloader is not None and dataloader_path.exists():
-        global_rank = get_parallel_state().global_rank
-        step = path.name.split('step')[-1]
+        global_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        step = state_dict.get("step", 0)
         dataloader_step_rank_path = dataloader_path / \
             f"dataloader_step{step}_rank{global_rank}.pth"
         _state_dict = torch.load(
-            dataloader_step_rank_path, map_location="cpu")
+            dataloader_step_rank_path, map_location="cpu", weights_only=False)
         dataloader_rank = _state_dict["dataloader"]
         dataloader.load_state_dict(dataloader_rank)
 

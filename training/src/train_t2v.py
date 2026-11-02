@@ -13,7 +13,6 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
-from torch.distributed.tensor import DTensor
 from torch.utils.tensorboard import SummaryWriter
 from einops import rearrange
 from diffusers import get_scheduler
@@ -24,16 +23,16 @@ from src.models import (
 )
 from src.optimizers import load_optimizer
 from src.distributed.parallel_states import (
-    init_distributed_environment_and_sequence_parallel,
-    get_parallel_state, sp_enabled, clean_dist_env
+    setup_distributed_training, clean_dist_env
 )
-from src.distributed.communications import broadcast_within_sp_group, broadcast_item
+from src.distributed.communications import broadcast_item
 from src.config import ExpConfig, load_config_class_from_pyfile
 from src.utils import (
     seed_everything,
     find_latest_checkpoint,
 )
 from src.utils.logging import setup_logger
+from src.utils.training import backward_if_finite, log_bucket_batch_sizes, step_optimizer, synchronize_batch_frames
 from src.utils.activation_checkpointing import apply_activation_checkpointing
 from src.utils.checkpoint import load_checkpoint, save_checkpoint
 
@@ -129,8 +128,6 @@ def sample_noise_and_timestep(
             (latents.shape[0], num_chunks), latents, cfg, noise_generator_cpu
         )
         sigmas = chunk_sigmas.to(device=latents.device)
-        if sp_enabled():
-            broadcast_within_sp_group(sigmas)
         chunk_ids = torch.div(
             torch.arange(total_latent_frames, device=latents.device),
             chunk_size,
@@ -142,8 +139,6 @@ def sample_noise_and_timestep(
             (latents.shape[0],), latents, cfg, noise_generator_cpu
         )
         sigmas = sigmas.to(device=latents.device)
-        if sp_enabled():
-            broadcast_within_sp_group(sigmas)
 
     timesteps = (sigmas * 1000)
 
@@ -172,8 +167,6 @@ def _build_teacher_forcing_history(
         (batch_size, num_chunks), generator=noise_generator_cpu,
     ).to(device=target_clean.device, dtype=target_clean.dtype)
     sig_chunk = min_sigma + sig_chunk * (max_sigma - min_sigma)
-    if sp_enabled():
-        broadcast_within_sp_group(sig_chunk)
 
     chunk_ids = torch.div(
         torch.arange(total_latent_frames, device=target_clean.device),
@@ -209,8 +202,6 @@ def _sample_resampling_forcing_sigmas(
     if shift != 1.0:
         sigmas = (shift * sigmas) / (1.0 + (shift - 1.0) * sigmas)
     sigmas = sigmas.to(device=device, dtype=dtype)
-    if sp_enabled():
-        broadcast_within_sp_group(sigmas)
     return sigmas
 
 
@@ -293,8 +284,6 @@ def _resampling_forcing_rollout(
         generated_history[:, :, chunk_start:chunk_end] = clean_chunk
 
     generated_history = generated_history.detach()
-    if sp_enabled():
-        broadcast_within_sp_group(generated_history)
     return generated_history
 
 
@@ -572,21 +561,8 @@ def forward_and_compute_loss(
     return loss.sum() / loss_mask.sum().clamp_min(1)
 
 
-def setup_distributed_training(cfg: ExpConfig) -> tuple[int, int, int, torch.device]:
-    local_rank = int(os.getenv("LOCAL_RANK", "0"))
-    global_rank = int(os.getenv("RANK", "0"))
-    world_size = int(os.getenv("WORLD_SIZE", "1"))
-
-    torch.cuda.set_device(local_rank)
-    device = torch.device("cuda", local_rank)
-    init_distributed_environment_and_sequence_parallel(sp_size=cfg.sp_size)
-
-    return local_rank, global_rank, world_size, device
-
-
 def setup_model_and_optimizer(cfg: ExpConfig, device: torch.device) -> tuple[torch.nn.Module, torch.optim.Optimizer, Any]:
     dit = load_dit(cfg, device=device)
-    dit.requires_grad_(True)
     dit.train()
     if cfg.enable_activation_checkpointing:
         dit = apply_activation_checkpointing(
@@ -610,7 +586,7 @@ def setup_model_and_optimizer(cfg: ExpConfig, device: torch.device) -> tuple[tor
 def main(cfg: ExpConfig):
     _validate_forcing_strategy(cfg)
 
-    _local_rank, global_rank, world_size, device = setup_distributed_training(cfg)
+    _local_rank, global_rank, world_size, device = setup_distributed_training()
 
     assert cfg.seed is not None, "Seed must be specified in the configuration."
     seed_everything(cfg.seed)
@@ -621,7 +597,7 @@ def main(cfg: ExpConfig):
     if global_rank <= 0:
         os.makedirs(cfg.output_dir, exist_ok=True)
         exp_dir = Path(cfg.output_dir) / \
-            f"{cfg.exp_name}_sp{cfg.sp_size}_world{world_size}"
+            f"{cfg.exp_name}_world{world_size}"
         log_dir = exp_dir / "logs"
         ckpt_dir = exp_dir / "checkpoints"
 
@@ -646,9 +622,6 @@ def main(cfg: ExpConfig):
         multiple_videos_data_files=cfg.train_multiple_videos_data_files,
         video_data_files=cfg.train_video_data_files,
         bucket_configs=cfg.bucket_configs,
-        bucket_configs_options=cfg.bucket_configs_options,
-        bucket_configs_options_prob=cfg.bucket_configs_options_prob,
-        prioritize_frame_matching=cfg.prioritize_frame_matching,
         image_caption_keys=cfg.train_image_caption_keys,
         image_caption_sampling_prob=cfg.train_image_caption_sampling_prob,
         multiple_images_caption_keys=cfg.train_multiple_images_caption_keys,
@@ -668,8 +641,6 @@ def main(cfg: ExpConfig):
         seed=cfg.seed,
         tar_files_shuffle_seed=cfg.tar_files_shuffle_seed,
         rec_aug_rate=cfg.rec_aug_rate,
-        ref_image_basesize=cfg.ref_image_basesize,
-        ref_image_bucket_configs=cfg.ref_image_bucket_configs,
     )
 
     dit, optimizer, lr_scheduler = setup_model_and_optimizer(cfg, device)
@@ -706,21 +677,17 @@ def main(cfg: ExpConfig):
 
     pipeline = load_pipeline(cfg, dit, device)
 
-    total_batch_size = cfg.micro_batch_size * \
-        (world_size / cfg.sp_size) * cfg.gradient_accumulation_steps
+    log_bucket_batch_sizes(cfg, world_size, logger)
     total_params = sum(p.numel()
                        for p in dit.parameters() if p.requires_grad) / 1e9
     logger.info(
         f"Gradient accumulation steps: {cfg.gradient_accumulation_steps}")
-    logger.info(f"Micro batch size: {cfg.micro_batch_size}")
-    logger.info(f"Total batch size: {total_batch_size}")
     logger.info(f"Total training steps: {cfg.max_train_steps}")
     logger.info(f"Total trainable parameters = {total_params:.2f} B")
     logger.info(
         f"Enable activation checkpointing: {cfg.enable_activation_checkpointing}")
 
-    noise_seed = cfg.seed + \
-        (get_parallel_state().sp_group_id if sp_enabled() else global_rank)
+    noise_seed = cfg.seed + global_rank
     noise_generator_cpu = torch.Generator(device="cpu").manual_seed(noise_seed)
     noise_generator_cuda = torch.Generator(
         device="cuda").manual_seed(noise_seed)
@@ -737,11 +704,12 @@ def main(cfg: ExpConfig):
         record_loss = {'Loss/train_loss': 0.0}
         log_step = step % cfg.log_interval == 0
         task_loss_stats = torch.zeros((len(LOSS_TASK_TYPES), 2), device=device) if log_step else None
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
+        successful_backwards = 0
         step_start_time = time.perf_counter()
         for accumulation_step in range(cfg.gradient_accumulation_steps):
             data_start_time = time.perf_counter()
-            batch = next(train_data_iterator)
+            batch = synchronize_batch_frames(next(train_data_iterator), device)
             data_time = time.perf_counter() - data_start_time
             data_times.append(data_time)
 
@@ -775,39 +743,23 @@ def main(cfg: ExpConfig):
                 target=target,
                 additional_inputs=additional_inputs,
             )
+            loss = loss / cfg.gradient_accumulation_steps
+            if not backward_if_finite(loss, logger, f"Step {step} accumulation {accumulation_step}", model=dit):
+                continue
+            successful_backwards += 1
             if task_loss_stats is not None:
                 task_id = LOSS_TASK_TYPES.index(additional_inputs["task_type"])
-                task_loss_stats[task_id, 0] += loss.detach()
+                task_loss_stats[task_id, 0] += loss.detach() * cfg.gradient_accumulation_steps
                 task_loss_stats[task_id, 1] += 1
-            loss = loss / cfg.gradient_accumulation_steps
-            assert not torch.isnan(loss).any(
-            ), f"Loss contains NaN values: {loss}"
-            assert not torch.isinf(loss).any(
-            ), f"Loss contains Inf values: {loss}"
-            loss.backward()
 
             avg_loss = loss.detach().clone()
             dist.all_reduce(avg_loss, op=dist.ReduceOp.AVG)
             record_loss['Loss/train_loss'] += avg_loss.item()
 
-        if step == 1 or step % cfg.grad_check_interval == 0:
-            for param in dit.parameters():
-                if param.grad is not None:
-                    assert not torch.isnan(param.grad).any(
-                    ), "NaN detected in gradient."
-                    assert not torch.isinf(param.grad).any(
-                    ), "Inf detected in gradient."
-
-        grad_norm = 0.0
-        if cfg.max_grad_norm is not None:
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                dit.parameters(), max_norm=cfg.max_grad_norm)
-            if isinstance(grad_norm, DTensor):
-                grad_norm = grad_norm.full_tensor()
-            grad_norm = grad_norm.item()
-
-        optimizer.step()
-        lr_scheduler.step()
+        grad_norm = step_optimizer(
+            optimizer, lr_scheduler, cfg.max_grad_norm, successful_backwards, logger,
+        )
+        grad_norm = grad_norm.item() if grad_norm is not None else 0.0
         step_time = time.perf_counter() - step_start_time
         step_times.append(step_time)
 

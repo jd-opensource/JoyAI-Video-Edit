@@ -16,16 +16,13 @@ import datasets
 from datasets.distributed import split_dataset_by_node
 from einops import rearrange
 import torch
-import torchvision.transforms.functional as TF
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torch.utils.data import IterableDataset
 from diffusers.utils import is_ftfy_available
 
-from src.dataset.bucket_util import BucketGroup
-from src.distributed.parallel_states import get_parallel_state, sp_enabled
+from src.dataset.bucket_util import BucketGroup, reference_size, resize_pixels
 from src.utils import get_evenly_divisible_files, get_from_dict
 from src.utils.logging import get_logger
-from src.config import DEFAULT_VIDEO_RESOLUTION, generate_video_image_bucket
 
 if is_ftfy_available():
     import ftfy
@@ -99,15 +96,7 @@ def to_rgb_on_white(image: Image.Image) -> Image.Image:
 
 
 def resize_crop_normalize(x: torch.Tensor, target_size: tuple[int, int]) -> torch.Tensor:
-    h, w = x.shape[-2:]
-    bh, bw = target_size
-    scale = max(bh / h, bw / w)
-    resize_h, resize_w = math.ceil(h * scale), math.ceil(w * scale)
-
-    x = TF.resize(x, (resize_h, resize_w),
-                  interpolation=TF.InterpolationMode.BILINEAR, antialias=True)
-    x = TF.center_crop(x, target_size)
-    return x / 127.5 - 1.0
+    return resize_pixels(x, *target_size) / 127.5 - 1.0
 
 
 class ImageVideoWebDataset(IterableDataset):
@@ -118,9 +107,6 @@ class ImageVideoWebDataset(IterableDataset):
         multiple_videos_data_files: str | list[str] | None,
         video_data_files: str | list[str] | None,
         bucket_configs: list[tuple[int, int, int, int, int]] | None = None,
-        bucket_configs_options: list[tuple[int, int, int, int, int]] | None = None,
-        bucket_configs_options_prob: float = 0.5,
-        prioritize_frame_matching: bool = True,
         image_caption_keys: list[str] | None = None,
         image_caption_sampling_prob: list[float] | None = None,
         multiple_images_caption_keys: list[str] | None = None,
@@ -140,8 +126,6 @@ class ImageVideoWebDataset(IterableDataset):
         tar_files_shuffle_seed: int | None = None,
         buffer_size: int = 1000,
         rec_aug_rate: float = 0.0,
-        ref_image_basesize: int = DEFAULT_VIDEO_RESOLUTION[0],
-        ref_image_bucket_configs: list[tuple[int, int, int, int, int]] | None = None,
     ):
         if image_data_files is None and not math.isclose(image_sampling_prob, 0.0, abs_tol=1e-8):
             raise ValueError(
@@ -198,32 +182,9 @@ class ImageVideoWebDataset(IterableDataset):
         # Share task choices across ranks; advance only after yielding.
         self.task_rng = random.Random(seed)
 
-        self.bucket_group = BucketGroup(
-            bucket_configs, prioritize_frame_matching=prioritize_frame_matching)
+        self.bucket_group = BucketGroup(bucket_configs)
         self.current_buckets = {b: []
                                 for b in self.bucket_group.bucket_configs}
-
-        if ref_image_bucket_configs is None:
-            ref_image_bucket_configs = generate_video_image_bucket(
-                img_basesize=ref_image_basesize,
-                bs_img=1,
-                bs_vid=0,
-                bs_mimg=0,
-                bs_mvid=0,
-            )
-        self.ref_image_bucket_group = BucketGroup(
-            ref_image_bucket_configs,
-            prioritize_frame_matching=prioritize_frame_matching,
-        )
-
-        self.bucket_group_option = None
-        if bucket_configs_options is not None:
-            self.bucket_configs_options_prob = bucket_configs_options_prob
-            self.bucket_group_option = BucketGroup(
-                bucket_configs_options, prioritize_frame_matching=prioritize_frame_matching)
-            temp_current_buckest = {b: []
-                                    for b in self.bucket_group_option.bucket_configs}
-            self.current_buckets.update(temp_current_buckest)
 
         self._image_dataset, self._image_iterator = None, None
         if image_data_files is not None:
@@ -253,8 +214,8 @@ class ImageVideoWebDataset(IterableDataset):
                 "json": datasets.Value("string"),
                 "__key__": datasets.Value("string"),
                 "__url__": datasets.Value("string"),
-                "0.mp4": datasets.Video(),
-                "1.mp4": datasets.Video(),
+                "0.mp4": datasets.Video(decode=False),
+                "1.mp4": datasets.Video(decode=False),
                 "0.jpg": datasets.Image(),
             })
             self._multiple_videos_dataset, self._multiple_videos_iterator = self._init_dataset(
@@ -308,27 +269,7 @@ class ImageVideoWebDataset(IterableDataset):
         return dataset, iterator
 
     def _get_distributed_info(self):
-        if sp_enabled():
-            ps = get_parallel_state()
-            return ps.world_size // ps.sp_size, ps.sp_group_id
         return int(os.getenv("WORLD_SIZE", "1")), int(os.getenv("RANK", "0"))
-
-    def _sample_bucket_group(self):
-        if self.bucket_group_option is None:
-            return self.bucket_group
-
-        if not 0 <= self.bucket_configs_options_prob <= 1:
-            raise ValueError(
-                f"Illegal bucket_configs_options_prob: {self.bucket_configs_options_prob}"
-            )
-        return self.rng.choices(
-            [self.bucket_group, self.bucket_group_option],
-            weights=[
-                1 - self.bucket_configs_options_prob,
-                self.bucket_configs_options_prob,
-            ],
-            k=1,
-        )[0]
 
     def _open_video_reader(self, video: Any):
         if isinstance(video, dict):
@@ -387,8 +328,7 @@ class ImageVideoWebDataset(IterableDataset):
 
         height, width = self._get_video_hw(video_reader)
         fps_ratio = self._get_video_fps_ratio(video_reader)
-        bucket_group = self._sample_bucket_group()
-        bucket = bucket_group.find_best_bucket((1, int(n_frame // fps_ratio), height, width))
+        bucket = self.bucket_group.find_best_bucket((1, int(n_frame // fps_ratio), height, width))
         pixel = self._sample_video_with_bucket(video_reader, bucket)
         pixel = pixel.unsqueeze(0)
         return pixel, bucket
@@ -451,8 +391,7 @@ class ImageVideoWebDataset(IterableDataset):
 
         target_height, target_width = self._get_video_hw(target_reader)
         target_fps_ratio = self._get_video_fps_ratio(target_reader)
-        bucket_group = self._sample_bucket_group()
-        bucket = bucket_group.find_best_bucket(
+        bucket = self.bucket_group.find_best_bucket(
             (len(videos), int(len(target_reader) // target_fps_ratio), target_height, target_width)
         )
 
@@ -474,8 +413,7 @@ class ImageVideoWebDataset(IterableDataset):
     def _process_ref_image(self, image: Image.Image):
         pixel = torch.from_numpy(np.array(to_rgb_on_white(image)))
         h, w = pixel.shape[:2]
-        bucket = self.ref_image_bucket_group.find_best_bucket((1, 1, h, w))
-        _, _, _, target_height, target_width = bucket
+        target_height, target_width = reference_size(h, w)
         pixel = rearrange(pixel, "h w c -> 1 c h w")
         pixel = resize_crop_normalize(pixel, (target_height, target_width))
         return rearrange(pixel, "1 c h w -> c 1 h w")
@@ -502,9 +440,8 @@ class ImageVideoWebDataset(IterableDataset):
 
         bucket_source = images[0] if use_rec_aug else images[-1]
         w, h = bucket_source.size
-        bucket_group = self._sample_bucket_group()
         num_items = 2 if use_rec_aug else len(images)
-        bucket = bucket_group.find_best_bucket((num_items, 1, h, w))
+        bucket = self.bucket_group.find_best_bucket((num_items, 1, h, w))
         _, _, _, target_height, target_width = bucket
 
         pixel = []
@@ -527,8 +464,7 @@ class ImageVideoWebDataset(IterableDataset):
         h, w = pixel.shape[:2]
 
         pixel = rearrange(pixel, "h w c -> 1 c h w")
-        bucket_group = self._sample_bucket_group()
-        bucket = bucket_group.find_best_bucket((1, 1, h, w))
+        bucket = self.bucket_group.find_best_bucket((1, 1, h, w))
         _, _, _, target_height, target_width = bucket
         pixel = resize_crop_normalize(pixel, (target_height, target_width))
         pixel = rearrange(pixel, "1 c h w -> c 1 h w")
@@ -805,9 +741,6 @@ def build_webdataset_dataloader(
     multiple_videos_data_files: str | list[str] | None = None,
     video_data_files: str | list[str] | None = None,
     bucket_configs: list[tuple[int, int, int, int, int]] | None = None,
-    bucket_configs_options: list[tuple[int, int, int, int, int]] | None = None,
-    bucket_configs_options_prob: float = 0.5,
-    prioritize_frame_matching: bool = True,
     image_caption_keys: list[str] | None = None,
     image_caption_sampling_prob: list[float] | None = None,
     multiple_images_caption_keys: list[str] | None = None,
@@ -828,8 +761,6 @@ def build_webdataset_dataloader(
     tar_files_shuffle_seed: int | None = None,
     buffer_size: int = 1000,
     rec_aug_rate: float = 0.0,
-    ref_image_basesize: int = DEFAULT_VIDEO_RESOLUTION[0],
-    ref_image_bucket_configs: list[tuple[int, int, int, int, int]] | None = None,
 ):
     dataset = ImageVideoWebDataset(
         image_data_files=image_data_files,
@@ -837,9 +768,6 @@ def build_webdataset_dataloader(
         multiple_videos_data_files=multiple_videos_data_files,
         video_data_files=video_data_files,
         bucket_configs=bucket_configs,
-        bucket_configs_options=bucket_configs_options,
-        bucket_configs_options_prob=bucket_configs_options_prob,
-        prioritize_frame_matching=prioritize_frame_matching,
         image_caption_keys=image_caption_keys,
         image_caption_sampling_prob=image_caption_sampling_prob,
         multiple_images_caption_keys=multiple_images_caption_keys,
@@ -859,7 +787,5 @@ def build_webdataset_dataloader(
         tar_files_shuffle_seed=tar_files_shuffle_seed,
         buffer_size=buffer_size,
         rec_aug_rate=rec_aug_rate,
-        ref_image_basesize=ref_image_basesize,
-        ref_image_bucket_configs=ref_image_bucket_configs,
     )
     return StatefulDataLoader(dataset, batch_size=None, num_workers=num_workers, collate_fn=collate_batch)

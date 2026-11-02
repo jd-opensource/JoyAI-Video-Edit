@@ -1,0 +1,8 @@
+# Install after the environment described in the root README.
+datasets==4.4.2
+decord==0.6.0
+torchdata==0.11.0
+tensorboard>=2.20,<3
+peft==0.17.1
+ftfy>=6.3,<7
+openai>=1.0,<3

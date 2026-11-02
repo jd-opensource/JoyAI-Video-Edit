@@ -8,6 +8,7 @@ Follow the [main README](../README.md#quick-start) to set up the environment and
 
 ```bash
 cd training
+python -m pip install -r requirements.txt
 ```
 
 ## Method Overview
@@ -74,13 +75,19 @@ For an initial smoke test, adjust the relevant config as follows:
 | Setting | Example |
 | --- | --- |
 | Experiment and steps | `exp_name="toy"`, `max_train_steps=20`, `checkpoint_interval=10`, `lr_warmup_steps=5` |
-| Resolution and length | `TRAIN_RESOLUTION=(480, 832)`; set both bucket limits, `min_temporal` and `max_temporal`, to `49` |
-| Batch size | Keep `micro_batch_size=1` and all bucket `bs_*` values at `1`; increase `gradient_accumulation_steps` as needed |
+| Resolution and length | `TRAIN_RESOLUTION=(480, 840)`; set `frame_buckets=[49]` |
+| Batch size | Set bucket `bs_*` values and `gradient_accumulation_steps`; each task keeps its configured batch size across clip lengths |
 | Learning rate | Set `learning_rate` for Stage1; set `dmd_generator_learning_rate` and `dmd_fake_score_learning_rate` separately for Stage2 |
 | Task mixture | Adjust `image_sampling_prob`, `multiple_images_sampling_prob`, `video_sampling_prob`, and `multiple_videos_sampling_prob`; use `0, 0, 1, 0` for T2V only |
 | Long-horizon training | `dmd_rollout_num_chunks` controls generator rollout length, `dmd_grad_window_chunks` controls segment length, and `dmd_critic_rollout_num_chunks` controls critic rollout length independently |
 
-Keep V2V sampling enabled to test dynamic source guidance. Single-GPU training requires sufficient VRAM; for multi-GPU training, configure `hsdp_shard_dim` and `sp_size` rather than only increasing the process count.
+Keep V2V sampling enabled to test dynamic source guidance. Single-GPU training requires sufficient VRAM. Multi-GPU training uses data parallelism and FSDP2; set `hsdp_shard_dim` to a positive divisor of the total process count (for example, 8 to shard across 8 GPUs). Each rank loads a different batch. Their frame counts are trimmed to the shortest batch in that micro-batch so chunk-by-chunk rollouts execute the same number of forwards.
+
+Bucket tuples are `(batch_size, num_items, num_frames, height, width)`. Images and videos share spatial buckets scaled from `TRAIN_RESOLUTION`, with both dimensions aligned to 24 pixels. The target media selects the largest usable frame count, then the closest aspect ratio. Reference images use separate buckets with an area budget of `768²`, a 24-pixel grid, and a maximum aspect ratio of 4. The `bs_*` values set a fixed per-rank batch size for each task. Effective batch size is the sum of actual per-rank batch sizes over the accumulation steps.
+
+The long-horizon config inherits shared settings from `configs/stage2_distillation.py` and overrides only its resume path, experiment name, generator learning rate, rollout length, and temporal positions.
+
+`max_temporal_ids` sets a temporal position ceiling independently of `dmd_rollout_use_relative_temporal_ids`. When a window exceeds the ceiling, its absolute positions shift down and values below zero are floored at zero (for example, `0,49,50` becomes `0,7,8` with a ceiling of 8). Without a ceiling, `dmd_rollout_use_relative_temporal_ids=True` uses dense window positions and `False` retains absolute positions. The default ceilings are 2 for short rollouts and 8 for long rollouts.
 
 ### Stage1 → Stage2
 
@@ -93,16 +100,16 @@ bash scripts/train/stage1_ar.sh configs/stage1_ar.py 1
 Initialize distillation from the Stage1 checkpoint:
 
 ```bash
-export JOYAI_STAGE1_CKPT="$PWD/outputs/stage1_ar/toy_sp1_world1/checkpoints/global_step20/step_20.pth"
+export JOYAI_STAGE1_CKPT="$PWD/outputs/stage1_ar/toy_world1/checkpoints/global_step20/step_20.pth"
 bash scripts/train/stage2_distillation.sh configs/stage2_distillation.py 1
 ```
 
-The final `1` specifies the number of GPU processes per node. Logs and checkpoints are saved under `outputs/<stage>/<exp_name>_sp<sp_size>_world<world_size>/`. Set `JOYAI_OUTPUT_DIR` to override the output root.
+The final `1` specifies the number of GPU processes per node. Logs and checkpoints are saved under `outputs/<stage>/<exp_name>_world<world_size>/`. Set `JOYAI_OUTPUT_DIR` to override the output root. Set `resume_from_checkpoint` in the config to a checkpoint path to resume training.
 
 ### Long-Horizon Fine-Tuning
 
 ```bash
-export JOYAI_STAGE2_CKPT="$PWD/outputs/stage2_distillation/toy_sp1_world1/checkpoints/global_step20/step_20.pth"
+export JOYAI_STAGE2_CKPT="$PWD/outputs/stage2_distillation/toy_world1/checkpoints/global_step20/step_20.pth"
 JOYAI_OUTPUT_DIR=outputs/stage2_longtuning \
     bash scripts/train/stage2_distillation.sh configs/stage2_distillation_long-tuning.py 1
 ```
@@ -145,7 +152,11 @@ GPUS_PER_NODE=1 SAVE=outputs_eval/openvebench \
     configs/stage2_distillation.py "$JOYAI_CHECKPOINT"
 ```
 
-Override inference settings with `INFERENCE_STEP`, `CFG`, `SRC_CFG`, and `RESOLUTION`, or append `--max-items 1` for a single-sample check. Results are written to `SAVE/fullset/<edited_type>/`. Existing videos are skipped, so use a new `SAVE` directory when changing models or settings.
+Override inference settings with `INFERENCE_STEP`, `CFG`, `SRC_CFG`, and `RESOLUTION` (`480` or `720`), or append `--max-items 1` for a single-sample check. Results are written to `SAVE/fullset/<edited_type>/`. Existing videos are skipped, so use a new `SAVE` directory when changing models or settings.
+
+Benchmark inference runs an independent, unsharded model on each GPU and assigns different videos to each rank.
+
+`MAX_TEMPORAL_IDS` sets the inference ceiling independently of `USE_RELATIVE_ROPE`. Set `MAX_TEMPORAL_IDS=none` (or pass `--max-temporal-ids none`) to disable the ceiling. The benchmark scripts default to 8; set `MAX_TEMPORAL_IDS=2` when evaluating the default short-rollout model.
 
 ### Evaluation
 

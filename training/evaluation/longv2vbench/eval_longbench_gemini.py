@@ -311,7 +311,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from tqdm import tqdm
 
-from src.config import VAE_SPATIAL_FACTOR, _generate_video_hw_buckets_from_ratios
+from src.config import VAE_SPATIAL_FACTOR, scale_spatial_buckets
 
 
 API_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -324,7 +324,7 @@ FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
 FFPROBE_BIN = os.environ.get("FFPROBE_BIN", "ffprobe")
 EVAL_DOWNSAMPLE = True
 EVAL_FPS = 4
-EVAL_BUCKET_BASE_SIZE = (480, 832)
+EVAL_BUCKET_BASE_SIZE = (480, 840)
 EVAL_CRF = 32
 EVAL_MAX_SECONDS = 60
 
@@ -356,7 +356,7 @@ def get_eval_bucket(video_path: str) -> tuple[int, int]:
             rotation = side_data["rotation"]
     if round(float(rotation)) % 180 == 90:
         aspect_ratio = 1 / aspect_ratio
-    buckets = _generate_video_hw_buckets_from_ratios(*EVAL_BUCKET_BASE_SIZE, align=VAE_SPATIAL_FACTOR)
+    buckets = scale_spatial_buckets(EVAL_BUCKET_BASE_SIZE)
     return min(buckets, key=lambda shape: abs(shape[0] / shape[1] - aspect_ratio))
 
 
@@ -741,7 +741,7 @@ if __name__ == '__main__':
                         help="Resize to aspect-ratio buckets and sample frames before scoring.")
     parser.add_argument('--eval-fps', type=int, default=int(os.environ.get('GEMINI_EVAL_FPS', 4)))
     parser.add_argument('--eval-bucket-base-size', type=int, nargs=2, default=EVAL_BUCKET_BASE_SIZE,
-                        metavar=('HEIGHT', 'WIDTH'), help="Base size for evaluation buckets; defaults to 480 832.")
+                        metavar=('HEIGHT', 'WIDTH'), help="Base size for evaluation buckets; defaults to 480 840.")
     parser.add_argument('--eval-crf', type=int, default=int(os.environ.get('GEMINI_EVAL_CRF', 32)))
     parser.add_argument('--eval-max-seconds', type=int, default=int(os.environ.get('GEMINI_EVAL_MAX_SECONDS', 60)))
     args = parser.parse_args()

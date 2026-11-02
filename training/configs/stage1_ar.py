@@ -3,9 +3,9 @@
 import os
 from dataclasses import dataclass, field
 
-from src.config import ExpConfig, build_editing_bucket_configs, generate_video_image_bucket
+from src.config import DEFAULT_VIDEO_RESOLUTION, ExpConfig, build_editing_bucket_configs
 
-TRAIN_RESOLUTION = (720, 1248)
+TRAIN_RESOLUTION = DEFAULT_VIDEO_RESOLUTION
 
 @dataclass
 class Stage1ARConfig(ExpConfig):
@@ -118,34 +118,16 @@ class Stage1ARConfig(ExpConfig):
         default_factory=lambda: [1.0]
     )
     tar_files_shuffle_seed: int = 110
-    micro_batch_size: int = 1
     bucket_configs: list[tuple[int, int, int, int, int]] = field(
         default_factory=lambda: build_editing_bucket_configs(
-            img_basesize=TRAIN_RESOLUTION[0],
-            min_temporal=49,
-            max_temporal=121,
-            min_items=2,
-            max_items=2,
+            resolution=TRAIN_RESOLUTION,
+            frame_buckets=range(49, 122, 8),
             bs_img=1,
             bs_mimg=1,
             bs_vid=1,
             bs_mvid=1,
-            vid_basesizes=[TRAIN_RESOLUTION],
-            spatial_multiple=24,
         )
     )
-    ref_image_basesize: int = TRAIN_RESOLUTION[0]
-    ref_image_bucket_configs: list[tuple[int, int, int, int, int]] = field(
-        default_factory=lambda: generate_video_image_bucket(
-            img_basesizes=[TRAIN_RESOLUTION],
-            spatial_multiple=24,
-            bs_img=1,
-            bs_vid=0,
-            bs_mimg=0,
-            bs_mvid=0,
-        )
-    )
-    prioritize_frame_matching: bool = True
     ensure_divisible_shards: bool = False
     shuffle: bool = True
     num_workers: int = 0
@@ -157,7 +139,6 @@ class Stage1ARConfig(ExpConfig):
     max_train_steps: int = 10000000000
     gradient_accumulation_steps: int = 1
     checkpoint_interval: int = 500
-    grad_check_interval: int = 1000
     gc_interval: int = 5000
     log_interval: int = 1
     optimizer_name: str = 'adamw'
@@ -169,7 +150,6 @@ class Stage1ARConfig(ExpConfig):
     lr_scheduler: str = "constant_with_warmup"
     lr_warmup_steps: int = 0
     use_vit: bool = True
-    only_i2v: bool = False
     enable_activation_checkpointing: bool = True
     activation_checkpointing_skip_interval: int = 1
     causal_forcing_strategy: str = "resampling_forcing"
@@ -180,6 +160,5 @@ class Stage1ARConfig(ExpConfig):
     num_inference_steps: int = 30
     guidance_scale: float = 3.5
     source_guidance_scale: float = 1.5
-    sp_size: int = 1
     hsdp_shard_dim: int = 1
     reshard_after_forward: bool = True

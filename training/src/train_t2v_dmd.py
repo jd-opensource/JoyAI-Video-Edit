@@ -1,8 +1,6 @@
 """Resilient-DMD training with long-horizon autoregressive rollouts."""
 
 import gc
-import glob
-import inspect
 import os
 import random
 import sys
@@ -34,11 +32,9 @@ from src.dataset.webdataset import build_webdataset_dataloader
 from src.distributed.communications import broadcast_item
 from src.distributed.parallel_states import (
     clean_dist_env,
-    get_parallel_state,
-    init_distributed_environment_and_sequence_parallel,
-    sp_enabled,
+    setup_distributed_training,
 )
-from src.models import load_dit, load_pipeline
+from src.models import _read_dit_checkpoint, _strip_common_state_prefixes, _uses_pretrained_loading, load_dit, load_pipeline
 from src.train_t2v import (
     LOSS_TASK_TYPES,
     build_multi_item_prompt_images,
@@ -48,9 +44,11 @@ from src.train_t2v import (
 from src.utils import find_latest_checkpoint, seed_everything
 from src.utils.activation_checkpointing import apply_activation_checkpointing
 from src.utils.constants import PRECISION_TO_TYPE
-from src.utils.fsdp_load import maybe_load_fsdp_model, pt_weights_iterator, safetensors_weights_iterator
+from src.utils.fsdp_load import maybe_load_fsdp_model
 from src.utils.logging import setup_logger
+from src.utils.training import backward_if_finite, log_bucket_batch_sizes, step_optimizer, synchronize_batch_frames
 from src.utils.utils import build_from_config, get_obj_from_str
+from src.utils.lora import gather_lora_state_dict, validate_lora_state_dict
 
 
 _SAVE_OPTIONS = StateDictOptions(full_state_dict=True, cpu_offload=True)
@@ -96,47 +94,6 @@ def dmd_fake_score_adapter_name(cfg: ExpConfig) -> str:
 
 def get_module_device(module: torch.nn.Module) -> torch.device:
     return next(module.parameters()).device
-
-
-def _uses_pretrained_loading(config: dict | None) -> bool:
-    if config is None or config.get("pretrained") is None:
-        return False
-    target = str(config.get("target", ""))
-    try:
-        cls = get_obj_from_str(target)
-    except Exception:
-        return target.startswith("diffusers.")
-    return hasattr(cls, "from_pretrained")
-
-
-def _strip_common_state_prefixes(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    for prefix in ("model.", "module.", "transformer."):
-        stripped_state_dict = {}
-        matched = 0
-        for key, value in state_dict.items():
-            if key.startswith(prefix):
-                stripped_state_dict[key[len(prefix):]] = value
-                matched += 1
-            else:
-                stripped_state_dict[key] = value
-        if matched > 0:
-            state_dict = stripped_state_dict
-    return state_dict
-
-
-def _load_pt_or_safetensor_state_dict(ckpt_path: str, ckpt_type: str) -> dict[str, torch.Tensor]:
-    if ckpt_type == "safetensor":
-        safetensors_files = glob.glob(os.path.join(str(ckpt_path), "*.safetensors"))
-        if not safetensors_files:
-            raise ValueError(f"No safetensors files found in {ckpt_path}")
-        state_dict = dict(safetensors_weights_iterator(safetensors_files))
-    elif ckpt_type == "pt":
-        state_dict = dict(pt_weights_iterator([ckpt_path]))
-        if "model" in state_dict:
-            state_dict = state_dict["model"]
-    else:
-        raise ValueError(f"Unknown ckpt_type={ckpt_type!r}; expected 'pt' or 'safetensor'.")
-    return _strip_common_state_prefixes(state_dict)
 
 
 def _build_base_dit(cfg: ExpConfig, device: torch.device) -> torch.nn.Module:
@@ -365,7 +322,7 @@ def load_lora_base_dit(
 
     model = _build_base_dit(cfg, device)
     if base_ckpt:
-        state_dict = _load_pt_or_safetensor_state_dict(base_ckpt, base_ckpt_type)
+        state_dict = _strip_common_state_prefixes(_read_dit_checkpoint(base_ckpt, base_ckpt_type))
         load_state_dict = {}
         for key, value in state_dict.items():
             if (
@@ -373,8 +330,7 @@ def load_lora_base_dit(
                 and hasattr(model, "img_in")
                 and model.img_in.weight.shape != value.shape
             ):
-                value_new = value.new_zeros(model.img_in.weight.shape)
-                value = value.reshape_as(value_new)
+                value = value.reshape(model.img_in.weight.shape)
             load_state_dict[key] = value
         strict = not _uses_pretrained_loading(cfg.dit_arch_config)
         missing_keys, unexpected_keys = model.load_state_dict(load_state_dict, strict=strict)
@@ -425,17 +381,6 @@ def load_lora_base_dit(
     )
     set_trainable_adapter(model, generator_adapter_name)
     return model.eval(), generator_adapter_name, fake_score_adapter_name
-
-
-def setup_distributed_training(cfg: ExpConfig) -> tuple[int, int, int, torch.device]:
-    local_rank = int(os.getenv("LOCAL_RANK", "0"))
-    global_rank = int(os.getenv("RANK", "0"))
-    world_size = int(os.getenv("WORLD_SIZE", "1"))
-
-    torch.cuda.set_device(local_rank)
-    device = torch.device("cuda", local_rank)
-    init_distributed_environment_and_sequence_parallel(sp_size=cfg.sp_size)
-    return local_rank, global_rank, world_size, device
 
 
 def setup_dmd_models_and_optimizers(
@@ -595,8 +540,6 @@ class ResilientDMDController:
         self.num_layers = int(depth or 0)
         if depth is None:
             self._disable("dit_arch_config has no mm_double_blocks_depth to verify attention calls")
-        if sp_enabled():
-            self._disable("source-attention control requires sequence parallel size 1")
         self.ctrl_layers = tuple(range(self.num_layers))
         self._control_indices = {layer: index for index, layer in enumerate(self.ctrl_layers)}
         shape = (len(self.ctrl_layers), self.num_sigma, self.num_depth)
@@ -1212,7 +1155,9 @@ def _sample_exit_index(num_timesteps: int) -> int:
         raise ValueError("Resilient-DMD requires at least one denoising timestep.")
     if num_timesteps == 1:
         return 0
-    return int(torch.randint(0, num_timesteps, (1,)).item())
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    sampled = int(torch.randint(0, num_timesteps, (1,)).item()) if rank == 0 else 0
+    return int(broadcast_item(sampled, src=0))
 
 
 def _expand_per_token_timestep(
@@ -1417,10 +1362,10 @@ def generate_dmd_latents(
         return group_latents.detach()
 
     relative_positions = bool(getattr(cfg, "dmd_rollout_use_relative_temporal_ids", False))
-    temporal_kwargs: dict[str, Any] = {"relative": relative_positions}
-    max_temporal_ids = getattr(cfg, "max_temporal_ids", None)
-    if relative_positions and max_temporal_ids is not None and "max_temporal_ids" in inspect.signature(pipeline._gather_window_temporal_ids).parameters:
-        temporal_kwargs["max_temporal_ids"] = max_temporal_ids
+    temporal_kwargs: dict[str, Any] = {
+        "relative": relative_positions,
+        "max_temporal_ids": getattr(cfg, "max_temporal_ids", None),
+    }
     if hasattr(generator_model, "reset_inference_kv_cache"):
         generator_model.reset_inference_kv_cache()
 
@@ -1521,26 +1466,12 @@ def save_dmd_checkpoint(
     save_path.mkdir(parents=True, exist_ok=True)
 
     if cfg is not None and dmd_uses_lora(cfg):
-        try:
-            from peft.utils import get_peft_model_state_dict
-        except ImportError as exc:
-            raise ImportError("PEFT is required to save DMD LoRA checkpoints.") from exc
-
         generator_adapter_name = dmd_generator_adapter_name(cfg)
         fake_score_adapter_name = dmd_fake_score_adapter_name(cfg)
         activate_lora_adapter(generator, generator_adapter_name)
-        model_state_dict = get_model_state_dict(generator, options=_SAVE_OPTIONS)
-        generator_lora_state_dict = get_peft_model_state_dict(
-            generator,
-            state_dict=model_state_dict,
-            adapter_name=generator_adapter_name,
-        )
+        generator_lora_state_dict = gather_lora_state_dict(generator, generator_adapter_name)
         activate_lora_adapter(fake_score, fake_score_adapter_name)
-        fake_score_lora_state_dict = get_peft_model_state_dict(
-            fake_score,
-            state_dict=model_state_dict,
-            adapter_name=fake_score_adapter_name,
-        )
+        fake_score_lora_state_dict = gather_lora_state_dict(fake_score, fake_score_adapter_name)
         activate_lora_adapter(generator, generator_adapter_name)
         adapter_config = generator.peft_config[generator_adapter_name]
         target_modules = adapter_config.target_modules
@@ -1616,7 +1547,7 @@ def load_dmd_checkpoint(
             raise FileNotFoundError(f"Checkpoint {path} does not contain a .pth file.")
         checkpoint_path = ckpt_paths[0]
 
-    state_dict = torch.load(checkpoint_path, map_location=device)
+    state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     if cfg is not None and dmd_uses_lora(cfg):
         try:
             from peft.utils.save_and_load import _insert_adapter_name_into_state_dict
@@ -1630,17 +1561,8 @@ def load_dmd_checkpoint(
         if generator_lora_state_dict is None or fake_score_lora_state_dict is None:
             raise KeyError("DMD LoRA checkpoint must contain `generator_lora` and `fake_score_lora` state dicts.")
 
-        protection_keys = (
-            "noise_type_embed",
-            "ref_image_type_embed",
-            "ref_video_type_embed",
-            "img_in_ref.weight",
-            "img_in_ref.bias",
-        )
-
-        def _snapshot_protection(model: torch.nn.Module) -> dict[str, torch.Tensor]:
-            full_state = get_model_state_dict(model, options=_SAVE_OPTIONS)
-            return {k: full_state[k] for k in protection_keys if k in full_state}
+        validate_lora_state_dict(generator, generator_lora_state_dict, generator_adapter_name)
+        validate_lora_state_dict(fake_score, fake_score_lora_state_dict, fake_score_adapter_name)
 
         gen_state_with_names = _insert_adapter_name_into_state_dict(
             dict(generator_lora_state_dict),
@@ -1653,53 +1575,17 @@ def load_dmd_checkpoint(
             parameter_prefix="lora_",
         )
 
-        protection_state = _snapshot_protection(generator)
-
-        combined_state_dict = {}
-        combined_state_dict.update(protection_state)
-        combined_state_dict.update(gen_state_with_names)
-        combined_state_dict.update(fake_state_with_names)
-
-        load_result = set_model_state_dict(
-            generator, combined_state_dict, options=_LOAD_OPTIONS_PARTIAL,
-        )
-
-        unexpected = list(getattr(load_result, "unexpected_keys", []) or [])
-        if unexpected:
-            from src.utils.logging import get_logger
-            get_logger().error(
-                f"LoRA resume produced {len(unexpected)} unexpected key(s) — these "
-                f"keys exist in the ckpt but have no target in the model. "
-                f"(showing up to 20): {unexpected[:20]}"
-            )
-            raise RuntimeError(
-                f"DMD LoRA resume failed: {len(unexpected)} unexpected key(s). "
-                "Check that `dmd_lora_target_modules` / `dmd_lora_rank` / adapter "
-                "names match between save time and resume time."
-            )
-
-        attempted_keys = set(combined_state_dict.keys())
-        missing = list(getattr(load_result, "missing_keys", []) or [])
-        attempted_missing = [k for k in missing if k in attempted_keys]
-        if attempted_missing:
-            from src.utils.logging import get_logger
-            get_logger().error(
-                f"LoRA resume: {len(attempted_missing)} key(s) we tried to load "
-                f"are reported missing — they were not applied to the model. "
-                f"(showing up to 20): {attempted_missing[:20]}"
-            )
-            raise RuntimeError(
-                "DMD LoRA resume failed: keys we attempted to load were not "
-                "applied. PEFT key transformation may be inconsistent with model."
-            )
-
-        from src.utils.logging import get_logger
-        get_logger().info(
-            f"LoRA resume loaded {len(combined_state_dict)} key(s) into model "
-            f"(protection={len(protection_state)}, "
-            f"generator={len(gen_state_with_names)}, "
-            f"fake_score={len(fake_state_with_names)})."
-        )
+        states = [(generator, gen_state_with_names), (fake_score, fake_state_with_names)]
+        if generator is fake_score:
+            states = [(generator, {**gen_state_with_names, **fake_state_with_names})]
+        for model, adapter_state in states:
+            result = set_model_state_dict(model, adapter_state, options=_LOAD_OPTIONS_PARTIAL)
+            missing = [name for name in result.missing_keys if name in adapter_state]
+            if missing or result.unexpected_keys:
+                raise RuntimeError(
+                    f"DMD LoRA resume failed: missing={missing[:20]}, "
+                    f"unexpected={result.unexpected_keys[:20]}."
+                )
 
         activate_lora_adapter(generator, generator_adapter_name)
     else:
@@ -1720,11 +1606,11 @@ def load_dmd_checkpoint(
 
     dataloader_path = path / "dataloader"
     if dataloader is not None and dataloader_path.exists():
-        global_rank = get_parallel_state().global_rank
-        step = path.name.split("step")[-1]
+        global_rank = dist.get_rank() if dist.is_initialized() else 0
+        step = state_dict.get("step", 0)
         dataloader_rank_path = dataloader_path / f"dataloader_step{step}_rank{global_rank}.pth"
         if dataloader_rank_path.exists():
-            dataloader_state = torch.load(dataloader_rank_path, map_location=device)
+            dataloader_state = torch.load(dataloader_rank_path, map_location="cpu", weights_only=False)
             dataloader.load_state_dict(dataloader_state["dataloader"])
 
     return state_dict.get("step", 0), state_dict.get("epoch", 0)
@@ -1742,7 +1628,7 @@ def _reduce_log_tensor(value: torch.Tensor | float | int, device: torch.device) 
 
 
 def main(cfg: ExpConfig):
-    _local_rank, global_rank, world_size, device = setup_distributed_training(cfg)
+    _local_rank, global_rank, world_size, device = setup_distributed_training()
 
     assert cfg.seed is not None, "Seed must be specified in the configuration."
     seed_everything(cfg.seed)
@@ -1751,7 +1637,7 @@ def main(cfg: ExpConfig):
 
     if global_rank <= 0:
         os.makedirs(cfg.output_dir, exist_ok=True)
-        exp_dir = Path(cfg.output_dir) / f"{cfg.exp_name}_sp{cfg.sp_size}_world{world_size}"
+        exp_dir = Path(cfg.output_dir) / f"{cfg.exp_name}_world{world_size}"
         log_dir = exp_dir / "logs"
         ckpt_dir = exp_dir / "checkpoints"
         for directory in [exp_dir, log_dir, ckpt_dir]:
@@ -1778,9 +1664,6 @@ def main(cfg: ExpConfig):
         multiple_videos_data_files=cfg.train_multiple_videos_data_files,
         video_data_files=cfg.train_video_data_files,
         bucket_configs=cfg.bucket_configs,
-        bucket_configs_options=cfg.bucket_configs_options,
-        bucket_configs_options_prob=cfg.bucket_configs_options_prob,
-        prioritize_frame_matching=cfg.prioritize_frame_matching,
         image_caption_keys=cfg.train_image_caption_keys,
         image_caption_sampling_prob=cfg.train_image_caption_sampling_prob,
         multiple_images_caption_keys=cfg.train_multiple_images_caption_keys,
@@ -1800,8 +1683,6 @@ def main(cfg: ExpConfig):
         seed=cfg.seed,
         tar_files_shuffle_seed=cfg.tar_files_shuffle_seed,
         rec_aug_rate=cfg.rec_aug_rate,
-        ref_image_basesize=cfg.ref_image_basesize,
-        ref_image_bucket_configs=cfg.ref_image_bucket_configs,
     )
 
     (
@@ -1853,18 +1734,16 @@ def main(cfg: ExpConfig):
         else:
             logger.info("No source-controller checkpoint found; starting with static source guidance.")
 
-    total_batch_size = cfg.micro_batch_size * (world_size / cfg.sp_size) * cfg.gradient_accumulation_steps
+    log_bucket_batch_sizes(cfg, world_size, logger)
     logger.info(f"Generator update ratio: {getattr(cfg, 'dmd_fake_gen_update_ratio', 5)}")
     logger.info(f"DMD generator steps: {getattr(cfg, 'dmd_generator_num_inference_steps', None)}")
     logger.info(f"Gradient accumulation steps: {cfg.gradient_accumulation_steps}")
-    logger.info(f"Micro batch size: {cfg.micro_batch_size}")
-    logger.info(f"Total batch size per update: {total_batch_size}")
     if dmd_uses_lora(cfg):
         logger.info("DMD LoRA mode: shared base transformer with separate generator/fake-score adapters.")
         logger.info(f"Generator LoRA adapter: {dmd_generator_adapter_name(cfg)}")
         logger.info(f"Fake-score LoRA adapter: {dmd_fake_score_adapter_name(cfg)}")
 
-    noise_seed = cfg.seed + (get_parallel_state().sp_group_id if sp_enabled() else global_rank)
+    noise_seed = cfg.seed + global_rank
     noise_generator_cpu = torch.Generator(device="cpu").manual_seed(noise_seed)
     noise_generator_cuda = torch.Generator(device="cuda").manual_seed(noise_seed)
     rng = random.Random(noise_seed)
@@ -1902,9 +1781,10 @@ def main(cfg: ExpConfig):
                 generator_model.train()
                 fake_score.eval()
                 real_score.eval()
+            generator_backwards = 0
             for accumulation_step in range(cfg.gradient_accumulation_steps):
                 data_start_time = time.perf_counter()
-                batch = next(train_data_iterator)
+                batch = synchronize_batch_frames(next(train_data_iterator), device)
                 last_data_time = time.perf_counter() - data_start_time
                 data_times.append(last_data_time)
 
@@ -1933,7 +1813,7 @@ def main(cfg: ExpConfig):
                 grouped_dmd_loss_sum = 0.0
 
                 def _generator_group_backward(group_latents, group_overrides):
-                    nonlocal grouped_dmd_loss_sum
+                    nonlocal grouped_dmd_loss_sum, generator_backwards
                     group_inputs = {**additional_inputs, **group_overrides}
                     group_loss = compute_generator_dmd_loss(
                         cfg,
@@ -1951,14 +1831,11 @@ def main(cfg: ExpConfig):
                         gradient_stats=dmd_grad_stats,
                     )
                     group_loss = group_loss / cfg.gradient_accumulation_steps
-                    if not torch.isfinite(group_loss):
-                        if global_rank == 0:
-                            logger.warning(
-                                f"Step {step} accumulation {accumulation_step}: "
-                                f"non-finite generator loss {group_loss.item()}; skipping group."
-                            )
+                    if not backward_if_finite(
+                        group_loss, logger, f"Step {step} accumulation {accumulation_step} generator group", model=generator_model,
+                    ):
                         return
-                    group_loss.backward()
+                    generator_backwards += 1
                     grouped_dmd_loss_sum += group_loss.detach() * cfg.gradient_accumulation_steps
 
                 generated_latents, score_overrides, grouped_backward = generate_dmd_latents(
@@ -1994,15 +1871,11 @@ def main(cfg: ExpConfig):
                         noise_generator_cpu,
                         gradient_stats=dmd_grad_stats,
                     ) / cfg.gradient_accumulation_steps
-                    if not torch.isfinite(loss):
-                        if global_rank == 0:
-                            logger.warning(
-                                f"Step {step} accumulation {accumulation_step}: "
-                                f"non-finite generator loss {loss.item()}; skipping micro-batch."
-                            )
-                        generator_optimizer.zero_grad(set_to_none=True)
+                    if not backward_if_finite(
+                        loss, logger, f"Step {step} accumulation {accumulation_step} generator", model=generator_model,
+                    ):
                         continue
-                    loss.backward()
+                    generator_backwards += 1
                     loss_value = loss.detach() * cfg.gradient_accumulation_steps
                 if task_loss_stats is not None and torch.is_tensor(loss_value):
                     task_id = LOSS_TASK_TYPES.index(additional_inputs["task_type"])
@@ -2012,24 +1885,11 @@ def main(cfg: ExpConfig):
                     _reduce_log_tensor(loss_value, device) / cfg.gradient_accumulation_steps
                 )
 
-            if step == 1 or step % cfg.grad_check_interval == 0:
-                for param in generator_model.parameters():
-                    if param.grad is not None:
-                        assert not torch.isnan(param.grad).any(), "NaN detected in generator gradient."
-                        assert not torch.isinf(param.grad).any(), "Inf detected in generator gradient."
-
-            if cfg.max_grad_norm is not None:
-                generator_clip_params = (
-                    iter_adapter_parameters(generator_model, dmd_generator_adapter_name(cfg))
-                    if dmd_uses_lora(cfg)
-                    else generator_model.parameters()
-                )
-                generator_grad_norm = torch.nn.utils.clip_grad_norm_(generator_clip_params, max_norm=cfg.max_grad_norm)
-                if log_step:
-                    record_loss["Grad/generator_norm"] = _reduce_log_tensor(generator_grad_norm, device)
-            generator_optimizer.step()
-            generator_lr_scheduler.step()
-            generator_optimizer.zero_grad(set_to_none=True)
+            generator_grad_norm = step_optimizer(
+                generator_optimizer, generator_lr_scheduler, cfg.max_grad_norm, generator_backwards, logger,
+            )
+            if log_step and generator_grad_norm is not None:
+                record_loss["Grad/generator_norm"] = _reduce_log_tensor(generator_grad_norm, device)
 
         fake_score_optimizer.zero_grad(set_to_none=True)
         if dmd_uses_lora(cfg):
@@ -2039,9 +1899,10 @@ def main(cfg: ExpConfig):
             generator_model.eval()
             fake_score.train()
             real_score.eval()
+        fake_backwards = 0
         for accumulation_step in range(cfg.gradient_accumulation_steps):
             data_start_time = time.perf_counter()
-            batch = next(train_data_iterator)
+            batch = synchronize_batch_frames(next(train_data_iterator), device)
             last_data_time = time.perf_counter() - data_start_time
             data_times.append(last_data_time)
 
@@ -2062,7 +1923,7 @@ def main(cfg: ExpConfig):
             grouped_fake_loss_sum = 0.0
 
             def _critic_group_backward(group_latents, group_overrides):
-                nonlocal grouped_fake_loss_sum
+                nonlocal grouped_fake_loss_sum, fake_backwards
                 group_inputs = {**additional_inputs, **group_overrides}
                 adapter_context = (
                     lora_adapter_context(fake_score, adapter_name=dmd_fake_score_adapter_name(cfg))
@@ -2082,14 +1943,11 @@ def main(cfg: ExpConfig):
                         noise_generator_cpu,
                     )
                     group_loss = group_loss / cfg.gradient_accumulation_steps
-                    if not torch.isfinite(group_loss):
-                        if global_rank == 0:
-                            logger.warning(
-                                f"Step {step} accumulation {accumulation_step}: "
-                                f"non-finite fake-score loss {group_loss.item()}; skipping group."
-                            )
+                    if not backward_if_finite(
+                        group_loss, logger, f"Step {step} accumulation {accumulation_step} fake-score group", model=fake_score,
+                    ):
                         return
-                    group_loss.backward()
+                    fake_backwards += 1
                     grouped_fake_loss_sum += group_loss.detach() * cfg.gradient_accumulation_steps
 
             generated_latents, score_overrides, grouped_backward = generate_dmd_latents(
@@ -2124,15 +1982,11 @@ def main(cfg: ExpConfig):
                     noise_generator_cuda,
                     noise_generator_cpu,
                 ) / cfg.gradient_accumulation_steps
-                if not torch.isfinite(fake_loss):
-                    if global_rank == 0:
-                        logger.warning(
-                            f"Step {step} accumulation {accumulation_step}: "
-                            f"non-finite fake-score loss {fake_loss.item()}; skipping micro-batch."
-                        )
-                    fake_score_optimizer.zero_grad(set_to_none=True)
+                if not backward_if_finite(
+                    fake_loss, logger, f"Step {step} accumulation {accumulation_step} fake-score", model=fake_score,
+                ):
                     continue
-                fake_loss.backward()
+                fake_backwards += 1
                 loss_value = fake_loss.detach() * cfg.gradient_accumulation_steps
             if task_loss_stats is not None and torch.is_tensor(loss_value):
                 task_id = LOSS_TASK_TYPES.index(additional_inputs["task_type"])
@@ -2142,24 +1996,11 @@ def main(cfg: ExpConfig):
                 _reduce_log_tensor(loss_value, device) / cfg.gradient_accumulation_steps
             )
 
-        if step == 1 or step % cfg.grad_check_interval == 0:
-            for param in fake_score.parameters():
-                if param.grad is not None:
-                    assert not torch.isnan(param.grad).any(), "NaN detected in fake-score gradient."
-                    assert not torch.isinf(param.grad).any(), "Inf detected in fake-score gradient."
-
-        if cfg.max_grad_norm is not None:
-            fake_clip_params = (
-                iter_adapter_parameters(fake_score, dmd_fake_score_adapter_name(cfg))
-                if dmd_uses_lora(cfg)
-                else fake_score.parameters()
-            )
-            fake_grad_norm = torch.nn.utils.clip_grad_norm_(fake_clip_params, max_norm=cfg.max_grad_norm)
-            if log_step:
-                record_loss["Grad/fake_score_norm"] = _reduce_log_tensor(fake_grad_norm, device)
-        fake_score_optimizer.step()
-        fake_score_lr_scheduler.step()
-        fake_score_optimizer.zero_grad(set_to_none=True)
+        fake_grad_norm = step_optimizer(
+            fake_score_optimizer, fake_score_lr_scheduler, cfg.max_grad_norm, fake_backwards, logger,
+        )
+        if log_step and fake_grad_norm is not None:
+            record_loss["Grad/fake_score_norm"] = _reduce_log_tensor(fake_grad_norm, device)
 
         step_time = time.perf_counter() - step_start_time
         step_times.append(step_time)

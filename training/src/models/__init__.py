@@ -6,6 +6,7 @@ from collections.abc import Sequence
 
 from src.utils.fsdp_load import maybe_load_fsdp_model, pt_weights_iterator, safetensors_weights_iterator
 from src.utils.logging import get_logger
+from src.utils.lora import validate_lora_state_dict
 from src.utils.constants import PRECISION_TO_TYPE
 from src.utils.utils import build_from_config, get_obj_from_str
 
@@ -21,6 +22,21 @@ def _uses_pretrained_loading(config: dict | None) -> bool:
         return target.startswith("diffusers.")
 
     return hasattr(cls, "from_pretrained")
+
+
+def _strip_common_state_prefixes(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    for prefix in ("model.", "module.", "transformer."):
+        stripped_state_dict = {}
+        matched = 0
+        for key, value in state_dict.items():
+            if key.startswith(prefix):
+                stripped_state_dict[key[len(prefix):]] = value
+                matched += 1
+            else:
+                stripped_state_dict[key] = value
+        if matched > 0:
+            state_dict = stripped_state_dict
+    return state_dict
 
 
 def _normalize_train_modules(train_modules: str | Sequence[str] | None) -> list[str] | None:
@@ -64,11 +80,31 @@ def _configure_dit_trainable_modules(model: torch.nn.Module, cfg) -> None:
     logger.info(f"Training {len(trainable_param_names)} parameter tensors.")
 
 
+def _load_vae(cfg, device: torch.device):
+    """Load VAE weights and initialize complete modules absent from the checkpoint."""
+    vae_kwargs = {"torch_dtype": PRECISION_TO_TYPE[cfg.vae_precision], "device": device}
+    if not _uses_pretrained_loading(cfg.vae_arch_config):
+        return build_from_config(cfg.vae_arch_config, **vae_kwargs)
+    vae, loading = build_from_config(
+        cfg.vae_arch_config, **vae_kwargs, low_cpu_mem_usage=False, output_loading_info=True,
+    )
+    missing_by_module = {}
+    for key in loading["missing_keys"]:
+        module_name, _, parameter_name = key.rpartition(".")
+        missing_by_module.setdefault(module_name, set()).add(parameter_name)
+    for module_name, missing in sorted(missing_by_module.items()):
+        module = vae.get_submodule(module_name)
+        parameters = set(dict(module.named_parameters(recurse=False)))
+        reset = getattr(module, "reset_parameters", None)
+        if missing != parameters or not callable(reset):
+            raise ValueError(f"Cannot initialize incomplete VAE module {module_name!r}: missing={sorted(missing)}.")
+        reset()
+    return vae
+
+
 def load_pipeline(cfg, dit, device: torch.device):
     """Build the frozen VAE, text encoder, scheduler, and editing pipeline."""
-    vae = build_from_config(
-        cfg.vae_arch_config, torch_dtype=PRECISION_TO_TYPE[cfg.vae_precision], device=device,
-    )
+    vae = _load_vae(cfg, device).eval().requires_grad_(False)
     tokenizer, text_encoder = build_from_config(
         cfg.text_encoder_arch_config, torch_dtype=PRECISION_TO_TYPE[cfg.text_encoder_precision], device=device,
     )
@@ -116,6 +152,7 @@ def _merge_generator_lora(model, checkpoint, cfg):
         }
     adapter_name = checkpoint.get("generator_adapter_name", "generator")
     model.add_adapter(LoraConfig(**adapter_config), adapter_name=adapter_name)
+    validate_lora_state_dict(model, weights, adapter_name)
     result = set_peft_model_state_dict(model, weights, adapter_name=adapter_name)
     missing_adapter_keys = [name for name in result.missing_keys if ".lora_" in name]
     if missing_adapter_keys or result.unexpected_keys:
@@ -124,7 +161,7 @@ def _merge_generator_lora(model, checkpoint, cfg):
     model.unload_lora()
 
 
-def load_dit(cfg, device: torch.device) -> torch.nn.Module:
+def load_dit(cfg, device: torch.device, *, use_fsdp: bool = True) -> torch.nn.Module:
     """Load DiT model with FSDP support."""
     logger = get_logger()
 
@@ -146,21 +183,11 @@ def load_dit(cfg, device: torch.device) -> torch.nn.Module:
     model = build_from_config(cfg.dit_arch_config, **model_kwargs)
     if hasattr(model, "materialize_meta_modules"):
         model.materialize_meta_modules()
-    if not dist.is_initialized() or dist.get_world_size() == 1:
+    if not use_fsdp or not dist.is_initialized() or dist.get_world_size() == 1:
         model.to(device=device)
 
     if state_dict is not None:
-        for prefix in ("model.", "module.", "transformer."):
-            stripped_state_dict = {}
-            matched = 0
-            for k, v in state_dict.items():
-                if k.startswith(prefix):
-                    stripped_state_dict[k[len(prefix):]] = v
-                    matched += 1
-                else:
-                    stripped_state_dict[k] = v
-            if matched > 0:
-                state_dict = stripped_state_dict
+        state_dict = _strip_common_state_prefixes(state_dict)
 
         load_state_dict = {}
         for k, v in state_dict.items():
@@ -169,8 +196,7 @@ def load_dit(cfg, device: torch.device) -> torch.nn.Module:
                 and hasattr(model, "img_in")
                 and model.img_in.weight.shape != v.shape
             ):
-                v_new = v.new_zeros(model.img_in.weight.shape)
-                v = v.reshape_as(v_new)
+                v = v.reshape(model.img_in.weight.shape)
             if (
                 k == "target_type_embed"
                 and hasattr(model, "noise_type_embed")
@@ -194,16 +220,17 @@ def load_dit(cfg, device: torch.device) -> torch.nn.Module:
         _merge_generator_lora(model, adapter_checkpoint, cfg)
     _configure_dit_trainable_modules(model, cfg)
 
-    model = maybe_load_fsdp_model(
-        model=model,
-        hsdp_shard_dim=cfg.hsdp_shard_dim,
-        reshard_after_forward=cfg.reshard_after_forward,
-        param_dtype=dtype,
-        reduce_dtype=torch.float32,
-        output_dtype=None,
-        cpu_offload=cfg.cpu_offload,
-        pin_cpu_memory=cfg.pin_cpu_memory,
-    )
+    if use_fsdp:
+        model = maybe_load_fsdp_model(
+            model=model,
+            hsdp_shard_dim=cfg.hsdp_shard_dim,
+            reshard_after_forward=cfg.reshard_after_forward,
+            param_dtype=dtype,
+            reduce_dtype=torch.float32,
+            output_dtype=None,
+            cpu_offload=cfg.cpu_offload,
+            pin_cpu_memory=cfg.pin_cpu_memory,
+        )
 
     total_params = sum(p.numel() for p in model.parameters())
     logger.info(f"Instantiate model with {total_params / 1e9:.2f}B parameters")

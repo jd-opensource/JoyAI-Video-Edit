@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from einops import rearrange
 from PIL import Image
 
-from transformers import Qwen2Tokenizer, Qwen2_5_VLForConditionalGeneration, AutoProcessor
+from transformers import Qwen2Tokenizer, PreTrainedModel, AutoProcessor
 
 from diffusers.utils import BaseOutput
 from diffusers.utils.torch_utils import randn_tensor
@@ -64,7 +64,7 @@ class Pipeline(DiffusionPipeline):
     def __init__(
         self,
         vae: XVAEChunkCausal,
-        text_encoder: Qwen2_5_VLForConditionalGeneration,
+        text_encoder: PreTrainedModel,
         tokenizer: Qwen2Tokenizer,
         transformer: Transformer3DModel,
         scheduler: FlowMatchDiscreteScheduler,
@@ -84,7 +84,7 @@ class Pipeline(DiffusionPipeline):
 
 
         text_encoder_ckpt = dict(args.text_encoder_arch_config.get("params", {}))['text_encoder_ckpt']
-        self.qwen_processor = AutoProcessor.from_pretrained(text_encoder_ckpt)
+        self.qwen_processor = AutoProcessor.from_pretrained(text_encoder_ckpt, local_files_only=True)
 
         self.prompt_template_encode = {
             'image': "<|im_start|>system\n \\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
@@ -125,9 +125,11 @@ class Pipeline(DiffusionPipeline):
         encoder_hidden_states = self.text_encoder(
             input_ids=txt_tokens.input_ids,
             attention_mask=txt_tokens.attention_mask,
-            output_hidden_states=True,
+            use_cache=False,
+            output_hidden_states=False,
+            return_dict=True,
         )
-        hidden_states = encoder_hidden_states.hidden_states[-1]
+        hidden_states = encoder_hidden_states.last_hidden_state
         split_hidden_states = self._extract_masked_hidden(
             hidden_states, txt_tokens.attention_mask)
         split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
@@ -213,9 +215,11 @@ class Pipeline(DiffusionPipeline):
         ).to(device)
         encoder_hidden_states = self.text_encoder(
             **inputs,
-            output_hidden_states=True,
+            use_cache=False,
+            output_hidden_states=False,
+            return_dict=True,
         )
-        last_hidden_states = encoder_hidden_states.hidden_states[-1]
+        last_hidden_states = encoder_hidden_states.last_hidden_state
         prompt_embeds = last_hidden_states[:, drop_idx:]
         prompt_embeds_mask = inputs['attention_mask'][:, drop_idx:]
         if prompt_embeds.shape[1] > max_sequence_length:
@@ -626,9 +630,10 @@ class Pipeline(DiffusionPipeline):
         relative: bool = False,
         max_temporal_ids: Optional[int] = None,
     ) -> torch.Tensor:
+        """Apply a ceiling independently of relative window numbering."""
         if max_temporal_ids is not None:
-
-
+            if max_temporal_ids < 2 * chunk_size:
+                raise ValueError("`max_temporal_ids` must be at least twice `chunk_size` to keep sink/history/active chunks distinct.")
             abs_ids = []
             for cid in selected_chunk_ids:
                 frame_start, frame_end = cls._chunk_frame_bounds(cid, chunk_size, total_latent_frames)
@@ -801,7 +806,7 @@ class Pipeline(DiffusionPipeline):
         cached_temporal_ids,
         active_chunk_id,
         cache_memory_ids,
-        use_relative_temporal_ids,
+        dynamic_temporal_ids,
         source_guidance_scale,
     ):
         def predict(scope, embeddings, mask, source):
@@ -819,7 +824,7 @@ class Pipeline(DiffusionPipeline):
                     kv_cache_scope=scope,
                     kv_cache_chunk_id=active_chunk_id,
                     kv_cache_selected_chunk_ids=cache_memory_ids,
-                    kv_cache_pre_rope=use_relative_temporal_ids,
+                    kv_cache_pre_rope=dynamic_temporal_ids,
                     return_dict=False,
                 )[0]
             return prediction.unsqueeze(1) if prediction.ndim == 5 else prediction
@@ -909,8 +914,9 @@ class Pipeline(DiffusionPipeline):
             raise ValueError("`num_inference_steps` must be a positive integer.")
         if not self.transformer.config.causal:
             raise ValueError("Streaming inference requires a chunk-causal transformer.")
-        if max_temporal_ids is not None and (max_temporal_ids < 0 or not use_relative_temporal_ids):
-            raise ValueError("`max_temporal_ids` must be non-negative and requires relative temporal ids.")
+        if max_temporal_ids is not None and (type(max_temporal_ids) is not int or max_temporal_ids < 0):
+            raise ValueError("`max_temporal_ids` must be a non-negative integer or None.")
+        dynamic_temporal_ids = use_relative_temporal_ids or max_temporal_ids is not None
         self._guidance_scale = guidance_scale
         device = self.transformer.device
         target_dtype = PRECISION_TO_TYPE[self.args.dit_precision]
@@ -999,10 +1005,10 @@ class Pipeline(DiffusionPipeline):
                     selected_ids = window["selected_chunk_ids"]
                     history_ids, active_id = selected_ids[:-1], selected_ids[-1]
                     current_latents = latents[:, :, :, chunk_start:chunk_end].to(device).clone()
-                    if use_relative_temporal_ids:
+                    if dynamic_temporal_ids:
                         window_ids = self._gather_window_temporal_ids(
                             selected_ids, chunk_size, total_latent_frames, device,
-                            relative=True, max_temporal_ids=max_temporal_ids,
+                            relative=use_relative_temporal_ids, max_temporal_ids=max_temporal_ids,
                         )
                         active_length = chunk_end - chunk_start
                         temporal_ids = window_ids[-active_length:]
@@ -1028,7 +1034,7 @@ class Pipeline(DiffusionPipeline):
                                 negative_prompt_embeds, negative_prompt_embeds_mask,
                                 active_reference, None if prefill_reference is not None else reference_images,
                                 temporal_ids, cached_ids, active_id, cache_ids,
-                                use_relative_temporal_ids, source_guidance_scale,
+                                dynamic_temporal_ids, source_guidance_scale,
                             )
                             current_latents = self.scheduler.step(prediction, timestep, current_latents.clone(), return_dict=False)[0]
                         latents[:, :, :, chunk_start:chunk_end] = current_latents.cpu()
@@ -1048,7 +1054,7 @@ class Pipeline(DiffusionPipeline):
                         negative_prompt_embeds_mask=negative_prompt_embeds_mask,
                         active_chunk_id=active_id,
                         history_chunk_ids=[] if store_clean_only_self else history_ids,
-                        pre_rope=use_relative_temporal_ids,
+                        pre_rope=dynamic_temporal_ids,
                         cached_temporal_ids=store_cached_ids,
                     )
                     next_ids = chunk_windows[chunk_index + 1]["selected_chunk_ids"][:-1] if chunk_index + 1 < len(chunk_windows) else []

@@ -28,7 +28,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from PIL import Image
 import uvicorn
 
-from xvideo.serving.pe import DEFAULT_MODEL as DEFAULT_PE_MODEL
+from xvideo.serving.pe import pe_available, pe_model_name
 from xvideo.serving.joyomni_streaming import (
     JoyOmniRuntime,
     StreamingSettings,
@@ -323,6 +323,43 @@ def _face_present_from(faces, w, h, *, min_ratio: float = 0.0, edge_margin: floa
     return False
 
 
+def _face_center_from(faces, w, h, *, min_ratio: float, edge_margin: float):
+    if not faces or min(w, h) <= 0:
+        return None
+    valid = [face for face in faces
+             if min(face[2], face[3]) >= min_ratio * min(w, h)
+             and face[0] >= edge_margin * w and face[1] >= edge_margin * h
+             and face[0] + face[2] <= (1 - edge_margin) * w
+             and face[1] + face[3] <= (1 - edge_margin) * h]
+    if not valid:
+        return None
+    fx, fy, fw, fh = max(valid, key=lambda face: face[2] * face[3])
+    return ((fx + fw / 2) / w, (fy + fh / 2) / h, min(fw, fh) / min(w, h))
+
+
+def _default_detection_mode(args):
+    if args.face_detection is True and args.full_body_detection is True:
+        raise ValueError("--face-detection and --full-body-detection cannot both be enabled")
+    if args.full_body_detection is True:
+        return "full"
+    if args.face_detection is False:
+        return "off"
+    if args.face_detection is True:
+        return "near"
+    return "near" if args.online_gate else "off"
+
+
+def _resolve_detection_mode(payload, args, *, file_input):
+    mode = payload.get("detection_mode")
+    if mode is None:
+        default = _default_detection_mode(args)
+        mode = "off" if file_input and default == "near" else default
+    mode = str(mode).strip().lower()
+    if mode not in {"off", "near", "full"}:
+        raise ValueError("detection_mode must be off, near, or full")
+    return mode
+
+
 def _count_faces_from(faces, w, h, *, count_min_ratio: float) -> int:
     if not faces:
         return 0
@@ -419,16 +456,20 @@ async def _enhance_prompt(
     pe_model: str | None,
     timeout: float,
     ref_image: Image.Image | None = None,
+    backend: str = "api",
+    pipeline=None,
+    inference_lock=None,
 ) -> dict[str, Any]:
     started = time.time()
     task_type = "rv2v" if ref_image is not None else "v2v"
     enhanced_prompt = raw_prompt
     error = None
-    model = pe_model or DEFAULT_PE_MODEL
+    model = pe_model_name(backend, pe_model)
     try:
-        from xvideo.serving.pe import PromptEnhancer
+        from xvideo.serving.pe import MimoPromptEnhancer, PromptEnhancer
 
-        enhancer = PromptEnhancer(model=pe_model)
+        enhancer = (MimoPromptEnhancer(pipeline, inference_lock) if backend == "mimo"
+                    else PromptEnhancer(model=pe_model))
         model = enhancer.model or model
         enhanced = await enhancer.enhance(
             task_type,
@@ -443,6 +484,7 @@ async def _enhance_prompt(
         error = repr(exc)
     report = {
         "enabled": True,
+        "backend": backend,
         "task_type": task_type,
         "model": model,
         "raw_prompt": raw_prompt,
@@ -453,6 +495,9 @@ async def _enhance_prompt(
     }
     if error is not None:
         report["error"] = error
+    elif backend == "mimo":
+        report["template"] = enhancer.template
+        report["decoder"] = getattr(enhancer, "decoder", "eager")
     return report
 
 class _SegmentedRecorder:
@@ -677,6 +722,9 @@ def create_app(args: argparse.Namespace) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        if args.pe_backend == "mimo":
+            from xvideo.serving.pe_aoti import prepare_mimo_aoti
+            prepare_mimo_aoti()
         if args.preload:
             get_runtime()
         yield
@@ -693,6 +741,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
 
     @app.get("/")
     def index() -> HTMLResponse:
+        default_detection = _default_detection_mode(args)
         server_defaults = {
             "width": args.width,
             "height": args.height,
@@ -701,13 +750,12 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             "seed": args.seed,
             "kv_reset_frames": args.kv_reset_frames,
             "output_quality": args.output_quality,
-            "online_gate": args.online_gate,
-            "full_body_start": args.full_body_start,
+            "detection_mode": default_detection,
             "static_diff_thresh": args.static_diff_thresh,
             "freeze_kv_on_static": args.freeze_kv_on_static,
             "profile_timings": args.profile_timings,
             "use_pe": args.use_pe,
-            "pe_available": bool(os.environ.get("OPENAI_API_KEY")),
+            "pe_available": pe_available(args.pe_backend),
             "max_temporal_ids": args.max_temporal_ids,
             "record_enabled": args.record_dir is not None,
         }
@@ -749,7 +797,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     else (args.postprocess_device or args.vae_pseudo_device or args.vae_decode_device or args.vae_device)
                 ),
                 "use_pe": args.use_pe,
-                "pe_model": args.pe_model or DEFAULT_PE_MODEL,
+                "detection_mode": _default_detection_mode(args),
+                "pe_model": pe_model_name(args.pe_backend, args.pe_model),
                 "kv_reset_frames": args.kv_reset_frames,
                 "max_temporal_ids": args.max_temporal_ids,
                 "freeze_kv_on_static": args.freeze_kv_on_static,
@@ -853,6 +902,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         ref_image: Image.Image | None = None
         face_gate_pending = False
         full_body_gate_pending = False
+        full_body_detection = False
+        detection_mode = "off"
         first_edit_capture_ms = None
         pe_defer = False
         pe_task: asyncio.Task | None = None
@@ -877,6 +928,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         send_lock = asyncio.Lock()
         stop_output_pump = asyncio.Event()
         output_task: asyncio.Task[None] | None = None
+        output_processing = False
 
         flow = {"recv": None, "at": 0.0, "dropped": 0, "congested": False,
                 "base": 0, "has_ack": False, "probe": 0, "clamped": False,
@@ -1144,13 +1196,17 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             )
 
         async def _output_pump(session_ref) -> None:
-            nonlocal completed_frames
+            nonlocal completed_frames, output_processing
             while not stop_output_pump.is_set():
                 result = await asyncio.to_thread(session_ref.wait_async_result, 0.05)
                 if result is None:
                     continue
-                await _send_chunk_result(result)
-                completed_frames += min(len(result.jpegs), result.valid_count) if result.valid_count is not None else len(result.jpegs)
+                output_processing = True
+                try:
+                    await _send_chunk_result(result)
+                    completed_frames += min(len(result.jpegs), result.valid_count) if result.valid_count is not None else len(result.jpegs)
+                finally:
+                    output_processing = False
 
         def _create_session():
             if app.state.runtime_error:
@@ -1309,6 +1365,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
 
         async def _reset_session(reason: str) -> None:
             nonlocal session, frames_since_session_reset, reset_count, edit_frames, completed_frames
+            nonlocal face_gate_pending, full_body_gate_pending
             if session is None:
                 return
             print(f"#####[STREAM] session reset ({reason})", flush=True)
@@ -1322,6 +1379,11 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             app.state.active_session = session
             frames_since_session_reset = 0
             edit_frames = completed_frames = 0
+            face_gate_pending = entry_gate
+            full_body_gate_pending = full_body_detection
+            gate_state.update(count=0, cx=None, cy=None, csz=None,
+                              settle_ax=None, settle_ay=None, settle_asz=None, person_check_i=0,
+                              pe_anchor=None, subject_count=None, cand=None, cand_n=0)
             ws_debug["kv_reset_count"] = reset_count
             ws_debug["frames_since_session_reset"] = frames_since_session_reset
             await _send_json(
@@ -1361,8 +1423,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     raise RuntimeError(app.state.runtime_error)
                 if output_task is not None and output_task.done():
                     output_task.result()
-                if (frames_out != last_frames_out or pe_task is not None
-                        or edit_frames > completed_frames):
+                if (frames_out != last_frames_out or pe_task is not None or output_processing
+                        or (session is not None and session.inflight_chunks() > 0)):
                     last_frames_out = frames_out
                     last_activity = time.monotonic()
                 if time.monotonic() - last_activity >= HOLDER_IDLE_TIMEOUT_S:
@@ -1442,16 +1504,21 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         session_max_inflight = max(0, int(
                             payload.get("max_inflight_chunks", args.max_inflight_chunks) or 0
                         ))
-                        use_pe = bool(payload.get("use_pe", args.use_pe)) and bool(os.environ.get("OPENAI_API_KEY"))
+                        use_pe = bool(payload.get("use_pe", args.use_pe)) and pe_available(args.pe_backend)
 
-                        presence_gate_enabled = bool(payload.get("gate_enabled", True)) and not lossless_mode
-                        full_body_start = bool(payload.get("full_body_start", args.full_body_start))
-                        full_body_gate_pending = full_body_start
-                        entry_gate = presence_gate_enabled or full_body_start
+                        try:
+                            detection_mode = _resolve_detection_mode(payload, args, file_input=lossless_mode)
+                        except ValueError as exc:
+                            await _send_json({"type": "error", "message": str(exc)})
+                            continue
+                        full_body_detection = detection_mode == "full"
+                        full_body_gate_pending = full_body_detection
+                        entry_gate = detection_mode != "off"
                         face_gate_pending = entry_gate
                         first_edit_capture_ms = None
-                        face_present_min_ratio = (args.full_body_face_min_ratio if full_body_start
+                        face_present_min_ratio = (args.full_body_face_min_ratio if full_body_detection
                                                   else args.face_present_min_ratio)
+                        ws_debug["detection_mode"] = detection_mode
                         flow["recv"] = None
                         flow["at"] = 0.0
                         flow["congested"] = False
@@ -1461,7 +1528,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         flow["base"] = frames_out
                         flow.update(has_ack=False, dropped=0, skew_min=None, skew_at=0.0, up_ms=0.0)
 
-                        gate_on = bool(args.online_gate) and presence_gate_enabled
+                        gate_on = entry_gate and bool(args.online_gate)
+                        ws_debug["live_detection"] = gate_on
 
                         fg_score = float(payload.get("fg_score", args.face_gate_score))
                         fg_min_below = float(payload.get("fg_min_below_ratio", args.face_gate_min_below_ratio))
@@ -1474,7 +1542,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         fg_absent = max(1, int(round(fg_absent * _fscale)))
                         fg_return = max(1, int(round(fg_return * _fscale)))
                         body_flip_frames = max(1, int(round(int(args.person_body_flip_frames) * _fscale)))
-                        person_stride = max(1, math.ceil(int(args.person_check_stride) * _fscale))
+                        person_stride = max(1, math.ceil(int(args.detection_stride) * _fscale))
                         count_change_checks = max(1, int(round(int(args.person_count_change_frames) * _fscale / person_stride)))
                         gate_move_eps = float(args.face_gate_move_eps) / _fscale
                         gate_state["count"] = 0
@@ -1486,6 +1554,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         gate_state["person_check_i"] = 0
                         gate_state["person_last"] = True
                         gate_state["face_last"] = True
+                        gate_state["face_unavailable"] = False
+                        gate_state["full_body_reason"] = None
                         gate_state["hold_reason"] = "no_person"
                         gate_state["body_miss"] = 0
                         gate_state["subject_count"] = None
@@ -1501,13 +1571,13 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         pe_defer = False
                         if use_pe:
                             # A cached close-up PE must not bypass the new full-body anchor.
-                            cached_enhanced_prompt = "" if full_body_start else str(payload.get("enhanced_prompt") or "").strip()
+                            cached_enhanced_prompt = "" if (full_body_detection or args.pe_backend == "mimo") else str(payload.get("enhanced_prompt") or "").strip()
                             if cached_enhanced_prompt:
                                 session_prompt = cached_enhanced_prompt
                                 pe_report = {
                                     "enabled": True,
                                     "task_type": "rv2v" if ref_image is not None else "v2v",
-                                    "model": args.pe_model or DEFAULT_PE_MODEL,
+                                    "model": pe_model_name(args.pe_backend, args.pe_model),
                                     "raw_prompt": raw_session_prompt,
                                     "enhanced_prompt": session_prompt,
                                     "elapsed_s": 0.0,
@@ -1547,7 +1617,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         reset_count = 0
                         ws_debug["kv_reset_frames"] = kv_reset_frames
                         ws_debug["use_pe"] = use_pe
-                        ws_debug["pe_model"] = args.pe_model or DEFAULT_PE_MODEL
+                        ws_debug["pe_model"] = pe_model_name(args.pe_backend, args.pe_model)
                         ws_debug["max_temporal_ids"] = max_temporal_ids
                         ws_debug["freeze_kv_on_static"] = freeze_kv_on_static
                         ws_debug["static_diff_thresh"] = static_diff_thresh
@@ -1567,8 +1637,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                 "kv_reset_frames": kv_reset_frames,
                                 "use_pe": use_pe,
                                 "pe_deferred": pe_defer,
-                                "full_body_start": full_body_start,
-                                "pe_model": args.pe_model or DEFAULT_PE_MODEL,
+                                "detection_mode": detection_mode,
+                                "pe_model": pe_model_name(args.pe_backend, args.pe_model),
                                 "max_temporal_ids": max_temporal_ids,
                                 "freeze_kv_on_static": freeze_kv_on_static,
                                 "static_diff_thresh": static_diff_thresh,
@@ -1589,10 +1659,6 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                               "message": "Recording is not enabled (--record-dir is unset)."})
                             continue
 
-                        if full_body_start and full_body_gate_pending:
-                            await _send_json({"type": "recording_finalized", "ok": False,
-                                              "message": "No stable full-body view was found. Show your head and feet, then hold still."})
-                            continue
                         try:
                             if pe_task is not None:
                                 await pe_task
@@ -1600,7 +1666,10 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                 await _drain_session()
                             await _stop_output_task()
                             finalized = rec_base
+                            output_recorder = rec_output
                             await asyncio.to_thread(_stop_recorders)
+                            if output_recorder is None or output_recorder.frames_written == 0:
+                                finalized = None
                         except Exception as exc:
                             await _send_json({"type": "recording_finalized", "ok": False, "message": str(exc)})
                             break
@@ -1611,6 +1680,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                             "rec": finalized.name if finalized is not None else None,
                             "source_start_s": float(first_edit_capture_ms or 0) / 1000 if lossless_mode else 0,
                             "message": None if finalized is not None
+                            else "No stable full-body view was found. Show your head and feet, then hold still."
+                            if full_body_detection and full_body_gate_pending
                             else "No downloadable result yet. Send an edit first.",
                         })
                         continue
@@ -1722,18 +1793,6 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         continue
 
                 if kv_reset_frames > 0 and frames_since_session_reset >= kv_reset_frames:
-                    face_gate_pending = entry_gate
-                    full_body_gate_pending = full_body_start
-                    gate_state["count"] = 0
-                    gate_state["cx"] = None
-                    gate_state["cy"] = None
-                    gate_state["pe_anchor"] = None
-                    gate_state["settle_ax"] = None
-                    gate_state["settle_ay"] = None
-                    gate_state["subject_count"] = None
-                    gate_state["cand"] = None
-                    gate_state["cand_n"] = 0
-
                     if pe_report and pe_report.get("enhanced_prompt"):
                         session_prompt = pe_report["enhanced_prompt"]
                     await _reset_session("kv_reset_frames")
@@ -1808,30 +1867,39 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                 return "settling"
 
                         full_body_gate_pending = False
-                        if pe_defer:
-                            gate_state["pe_anchor"] = frame
-                            return "__gate_pe__"
 
                     if gate_on and not face_gate_pending:
                         _tick = gate_state.get("person_check_i", 0)
                         _fresh = _tick == 0 or gate_state.get("absent_hold")
                         if _fresh:
                             _gfaces, _gfw, _gfh = _detect_gate_faces(frame, onnx_path=args.face_detector_onnx, score_thresh=fg_score)
-                            gate_state["person_last"] = _person_present(
-                                frame, onnx_path=args.person_detector_onnx, conf=float(args.person_gate_conf))
-
-                            if gate_state["person_last"]:
-                                gate_state["face_last"] = _face_present_from(
-                                    _gfaces, _gfw, _gfh,
-                                    min_ratio=float(face_present_min_ratio),
-                                    edge_margin=float(args.face_present_edge_margin))
+                            gate_state["face_unavailable"] = full_body_detection and _gfaces is None
+                            gate_state["face_last"] = (_gfaces is not None or not full_body_detection) and _face_present_from(
+                                _gfaces, _gfw, _gfh,
+                                min_ratio=float(face_present_min_ratio),
+                                edge_margin=float(args.face_present_edge_margin))
+                            if full_body_detection:
+                                _full_reason = None
+                                if gate_state["face_last"]:
+                                    _full_center = _face_center_from(
+                                        _gfaces, _gfw, _gfh,
+                                        min_ratio=float(face_present_min_ratio),
+                                        edge_margin=float(args.face_present_edge_margin))
+                                    _full_reason = _check_full_body_gate(
+                                        frame, face_center=_full_center,
+                                        onnx_path=args.person_detector_onnx, conf=float(args.person_gate_conf))
+                                gate_state["full_body_reason"] = _full_reason
+                                gate_state["person_last"] = _full_reason is None
                             else:
-                                gate_state["face_last"] = True
+                                gate_state["person_last"] = _person_present(
+                                    frame, onnx_path=args.person_detector_onnx, conf=float(args.person_gate_conf))
                         gate_state["person_check_i"] = (_tick + 1) % person_stride
                         _body_here = bool(gate_state["person_last"])
                         _face_here = bool(gate_state.get("face_last", True))
                         _present = _body_here and _face_here
-                        _reason_now = "no_person" if not _body_here else ("no_face" if not _face_here else "")
+                        _reason_now = ("face_unavailable" if gate_state.get("face_unavailable")
+                                       else gate_state.get("full_body_reason") if full_body_detection and not _body_here
+                                       else "no_person" if not _body_here else "no_face" if not _face_here else "")
 
                         body_flip = body_flip_frames
                         if _body_here:
@@ -1859,7 +1927,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                 gate_state["absent_hold"] = True
 
                                 try:
-                                    if session is not None:
+                                    if session is not None and not lossless_mode:
+                                        edit_frames -= len(session.pending_frames)
                                         session.pending_frames.clear()
                                         session.pending_metas.clear()
                                 except Exception:
@@ -1867,6 +1936,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                 print(f"#####[PERSON-GATE] {gate_state['hold_reason']} for {gate_state['absent']} frames -> black-hold", flush=True)
                         if gate_state.get("absent_hold"):
                             return ("__no_person__", gate_state.get("hold_reason", "no_person"))
+                        if full_body_detection and not _present:
+                            return ("__frame_skipped__",)
 
                         if _fresh:
                             _n = _count_faces_from(
@@ -1901,8 +1972,8 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                 gate_state["cand"] = None
                                 gate_state["cand_n"] = 0
 
-                    if pe_defer and not face_gate_pending:
-                        gate_state["pe_anchor"] = frame
+                    if pe_defer:
+                        gate_state["pe_anchor"] = (frame, frame_meta)
                         return "__gate_pe__"
 
                     session._raise_worker_error_if_needed()
@@ -1959,36 +2030,31 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         _hold_reason = chunk_results[1] if len(chunk_results) > 1 else "no_person"
                         await _send_json({"type": "no_person", "reason": _hold_reason, "frames_in": frames_in})
                         continue
+                    if sentinel == "__frame_skipped__":
+                        await _send_json({"type": "accepted", "frames_in": frames_in, "frames_out": frames_out,
+                                          "skipped": True, "next_chunk_needs": session.frames_per_next_chunk - len(session.pending_frames)})
+                        continue
                     if sentinel == "__person_returned__":
-                        face_gate_pending = True
-                        full_body_gate_pending = full_body_start
-                        gate_state["count"] = 0
-                        gate_state["cx"] = None
-                        gate_state["cy"] = None
-                        gate_state["pe_anchor"] = None
-                        gate_state["settle_ax"] = None
-                        gate_state["settle_ay"] = None
-                        gate_state["subject_count"] = None
-                        gate_state["cand"] = None
-                        gate_state["cand_n"] = 0
-
                         if pe_report and pe_report.get("enhanced_prompt"):
                             session_prompt = pe_report["enhanced_prompt"]
                         await _reset_session("person_returned")
                         continue
                 if isinstance(chunk_results, str) and chunk_results == "__gate_pe__":
                     if pe_task is None:
-                        anchor = gate_state.get("pe_anchor")
-                        gate_state["pe_anchor"] = None
+                        anchor, anchor_meta = gate_state.pop("pe_anchor")
                         await _send_json({"type": "pe_running", "frames_in": frames_in})
 
-                        async def _run_pe(_sess=session, _anchor=anchor, _raw=raw_session_prompt, _ref=ref_image):
+                        async def _run_pe(_sess=session, _anchor=anchor, _raw=raw_session_prompt, _ref=ref_image,
+                                          _anchor_meta=anchor_meta, _record_anchor=lossless_mode):
                             nonlocal pe_defer, pe_report, pe_task
+                            nonlocal edit_frames, frames_since_session_reset, face_gate_pending, first_edit_capture_ms
                             try:
                                 report = await _enhance_prompt(
                                     raw_prompt=_raw,
                                     pe_frame=_anchor, pe_model=args.pe_model,
-                                    ref_image=_ref,
+                                    ref_image=_ref, backend=args.pe_backend,
+                                    pipeline=_sess.runtime.pipeline,
+                                    inference_lock=app.state.inference_lock,
                                     timeout=max(1.0, float(args.pe_timeout_s)),
                                 )
                                 txt = str(report.get("enhanced_prompt") or _raw)
@@ -1997,9 +2063,20 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                     with app.state.inference_lock:
                                         _sess.prompt = txt
                                         _sess._initialize(_anchor)
+                                        if _record_anchor:
+                                            if rec_input is not None:
+                                                rec_input.submit(_anchor, _anchor_meta["t_capture_ms"])
+                                            _sess.push_frame(_anchor, frame_meta=_anchor_meta, drain_results=False)
                                 await _run_work(_swap, timeout=max(0.1, float(args.push_frame_timeout_s)))
                                 pe_report = report
+                                if _record_anchor:
+                                    edit_frames += 1
+                                    frames_since_session_reset += 1
+                                    face_gate_pending = False
+                                    first_edit_capture_ms = _anchor_meta["t_capture_ms"]
+                                    ws_debug["frames_since_session_reset"] = frames_since_session_reset
                                 ws_debug["pe_report"] = report
+                                pe_defer = False
                                 await _send_json({"type": "prompt_enhanced", **report})
                             except Exception as exc:
                                 _sess.request_stop()
@@ -2078,14 +2155,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-inference-steps", type=int, default=2)
     parser.add_argument("--fps", type=int, default=24, help="Client send/playback target fps; seeds the #fps UI control and paces the live camera. Recording follows each frame's t_capture_ms (media time for mp4 uploads, capture wall-clock for the live camera), so this does not set the recorded file's duration.")
     parser.add_argument("--use-pe", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--pe-backend", choices=("mimo", "api"),
+                        default=os.environ.get("JOYOMNI_PE_BACKEND", "mimo"))
     parser.add_argument("--pe-model", type=str, default=None)
     parser.add_argument("--pe-timeout-s", type=float, default=20.0, help="Hard wall-clock cap for deferred prompt-enhancement. On timeout the session degrades to the RAW prompt and starts editing, so a slow/hung PE endpoint (bad network / provider stall) can never wedge the client in the prompt-enhancement state.")
 
-    parser.add_argument("--face-detector-onnx", type=str, default=DEFAULT_FACE_DETECTOR_ONNX, help="YuNet ONNX weight for the face-presence gate. Missing -> gate disabled (edits run unconditionally).")
-    parser.add_argument("--full-body-start", action=argparse.BooleanOptionalAction, default=False,
-                        help="Optional full-body framing and stable-face entry gate (camera and file inputs). Off by default; independent of the presence gate. Uses person-box/face geometry, not foot keypoints.")
+    parser.add_argument("--face-detector-onnx", type=str, default=DEFAULT_FACE_DETECTOR_ONNX, help="YuNet ONNX weights for face geometry.")
+    parser.add_argument("--full-body-detection", dest="full_body_detection",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        help="Enable full-body detection at startup and during editing; mutually exclusive with --face-detection. Uses person-box/face geometry, not foot keypoints.")
     parser.add_argument("--full-body-face-min-ratio", type=float, default=0.05,
-                        help="Online minimum face ratio when full-body start is enabled; ordinary sessions retain --face-present-min-ratio.")
+                        help="Minimum face ratio during full-body live monitoring; face detection uses --face-present-min-ratio.")
     parser.add_argument("--face-gate-score", type=float, default=0.35, help="Min YuNet confidence to count as a face. Lower = detects motion-blurred faces (fewer transient drops), but more false positives.")
     parser.add_argument("--face-present-min-ratio", type=float, default=0.15, help="Mid-session presence: a detected face counts as 'present' only if its short side is >= this fraction of the frame short side. A too-small/partial face (subject sat down so only the top of the head shows) counts as no-face -> black-hold, instead of letting the model t2v-hallucinate a person. 0 = any face counts. Higher = stricter (black out sooner when the face gets small/far). Normal editing faces measure ~0.35, so 0.15 has a wide margin.")
     parser.add_argument("--face-present-edge-margin", type=float, default=0.0, help="Mid-session presence: a face whose box comes within this fraction of ANY frame border counts as a HALF/partial face (turned/leaned out) -> no-face -> black-hold, so the model never edits a half-face frame (which it fills in as a t2v hallucination). 0 = no edge check (default: disabled -- the face-box edge check false-blacked too eagerly when a face merely neared a border). Set e.g. 0.02 to re-enable a lenient check.")
@@ -2095,14 +2175,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--face-gate-settle-drift", type=float, default=0.05, help="Max net drift of the face center AND size from the settle-streak anchor (fraction of frame). Closes the 'slow continuous glide' hole where every per-frame step is < move-eps but they sum to a big slide (swing-into-frame motion baked into chunk0 -> ghost/duplicate person). Smaller = must hold more still. Complements --face-gate-move-eps (per-frame) + --face-gate-stable-frames (streak length).")
     parser.add_argument("--face-gate-stable-frames", type=int, default=24, help="Consecutive centered+still frames required before editing starts (~24fps send rate, so 24 ≈ 1s).")
 
-    parser.add_argument("--online-gate", action=argparse.BooleanOptionalAction, default=True, help="Server-wide master for MID-SESSION monitoring (no-person black-hold + person-count re-edit). A session runs it only when its gate_enabled is also true (browser checkbox / start field, default true); the ENTRY gate follows gate_enabled alone. Also seeds the UI checkbox default. --no-online-gate disables mid-session monitoring for all sessions.")
+    parser.add_argument("--face-detection", dest="face_detection",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        help="Enable face detection at startup and during editing (default mode); mutually exclusive with --full-body-detection.")
+    parser.add_argument("--online-gate", action=argparse.BooleanOptionalAction, default=True,
+                        help=argparse.SUPPRESS)
     parser.add_argument("--presence-absent-frames", type=int, default=12, help="Consecutive not-present frames (body missing, OR face too small / half-out per --face-present-*) before the output goes black. Small = stop FAST (less T2V leak on a quick sit-down / turn-away); larger = tolerate a brief occlusion / head-turn without black-holding. ~24fps, 12 ≈ 0.5s.")
     parser.add_argument("--presence-return-frames", type=int, default=24, help="Consecutive present (body+face) frames required to LEAVE the black-hold and re-run the startup gate. Separate from --presence-absent-frames so entry stays fast (black out quickly) while exit is well de-bounced: a face flickering through finger gaps while hands cover the face won't bounce no_face<->settling. ~24fps, 24 ≈ 1s.")
     parser.add_argument("--person-count-change-frames", type=int, default=24, help="Consecutive frames a NEW face count must hold before it is accepted. An INCREASE then re-edits (reset chunk0) so people who enter later get edited; a decrease only lowers the baseline. Debounce vs transient miscounts (sway / motion blur / a background face flickering in). Keep this larger than --presence-absent-frames so a brief face loss black-holds instead of faking a 0->1 'new person' re-edit. ~24fps, 24 ≈ 1s.")
     parser.add_argument("--count-face-min-ratio", type=float, default=0.45, help="For person-count-change: a face counts as an additional subject only if its short side is >= this fraction of the MAIN (largest/foreground) face's short side; an absolute floor of 5% of the frame short side also applies. Excludes far-smaller BACKGROUND people (e.g. a coworker behind the subject) that otherwise flip the count and trigger spurious re-edits. Higher = stricter (ignore more background).")
     parser.add_argument("--person-detector-onnx", type=str, default=DEFAULT_PERSON_DETECTOR_ONNX, help="YOLOv8n ONNX (fixed 320 input) for mid-session body presence via cv2.dnn. Missing/unloadable -> the body check passes through (always 'present'); face-present rules still apply, so no_face black-holds can still trigger.")
     parser.add_argument("--person-gate-conf", type=float, default=0.4, help="Min YOLO person-class score to count the person as present.")
-    parser.add_argument("--person-check-stride", type=int, default=2, help="Run the person detector every Nth frame during editing (YOLO ~27ms; stride amortizes the cost). Smaller = notices the subject LEAVING sooner, more CPU. During a black-hold the check runs every frame regardless, so return detection is unaffected by the stride.")
+    parser.add_argument("--detection-stride", type=int, default=2,
+                        help="Shared face/full-body monitoring interval at 24 FPS; scaled with client FPS. Startup and paused recovery inspect every frame.")
     parser.add_argument("--person-body-flip-frames", type=int, default=6, help="Consecutive body-misses before the client reason flips to no_person. Below this, a lone YOLO dip (a hand/object over the face also clips the torso) keeps the current reason -- normally show_full_face -- so the hint doesn't strobe no_face<->no_person. Reason-only de-bounce; the black-hold timing (--presence-absent-frames) is unaffected. ~24fps, 6 ≈ 0.25s. Higher = more reluctant to ever show no_person; 1 = report no_person on the first miss (old behavior).")
     parser.add_argument("--output-quality", default="auto",
                         help="Downlink preview quality: 'auto' (RTT-adaptive) or a fixed 1-100.")
@@ -2131,7 +2216,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 def parse_args() -> argparse.Namespace:
-    return build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
+    try:
+        _default_detection_mode(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+    return args
 
 def main() -> None:
     import logging
