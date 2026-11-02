@@ -18,6 +18,11 @@ EXTRA_ARGS=()
 if [[ "${USE_RELATIVE_ROPE:-True}" == "True" ]]; then
     EXTRA_ARGS+=(--use-relative-rope)
 fi
+if [[ "${STORE_CLEAN_ONLY_SELF:-}" == "True" ]]; then
+    EXTRA_ARGS+=(--store-clean-only-self)
+elif [[ "${STORE_CLEAN_ONLY_SELF:-}" == "False" ]]; then
+    EXTRA_ARGS+=(--no-store-clean-only-self)
+fi
 if [[ "${USE_PE:-False}" == "True" ]]; then
     EXTRA_ARGS+=(--pe-csv-path "${PE_CSV_PATH:-${DATASET_ROOT}/pe_benchmark_videos.csv}")
 fi
@@ -47,7 +52,6 @@ torchrun \
     --neg-prompt "$NEG_PROMPT" \
     --resolution "${RESOLUTION:-720}" \
     --max-temporal-ids "${MAX_TEMPORAL_IDS:-8}" \
-    --store-clean-only-self \
     --seed 42 \
     "${EXTRA_ARGS[@]}" "${@:3}"
 

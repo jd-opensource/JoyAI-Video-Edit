@@ -220,50 +220,64 @@ def _resampling_forcing_rollout(
     model_dtype = model.dtype
     prompt_embeds = prompt_embeds.to(dtype=model_dtype)
     if ref_image_latent is not None:
-        ref_image_latent = [latent.to(dtype=model_dtype) if latent is not None else None for latent in ref_image_latent]
+        if torch.is_tensor(ref_image_latent):
+            ref_image_latent = ref_image_latent.to(dtype=model_dtype)
+        else:
+            ref_image_latent = [latent.to(dtype=model_dtype) if latent is not None else None for latent in ref_image_latent]
     generated_history = clean_target.clone()
 
-    for window in chunk_windows:
-        chunk_index = window["chunk_idx"]
-        chunk_start, chunk_end = window["chunk_start"], window["chunk_end"]
-        selected_ids = window["selected_chunk_ids"]
-        active_frames = chunk_end - chunk_start
-        temporal_ids = pipeline._gather_window_temporal_ids(
-            selected_ids, chunk_size, total_frames, device, relative=False,
-        ).unsqueeze(0).expand(batch_size, -1)
-        sigma = chunk_sigmas[:, chunk_index]
-        sigma_view = sigma.view(batch_size, 1, 1, 1, 1)
-        target_chunk = clean_target[:, :, chunk_start:chunk_end]
-        noisy_chunk = (1.0 - sigma_view) * target_chunk + sigma_view * noise[:, :, chunk_start:chunk_end]
-        history = pipeline._gather_window_tensor(
-            generated_history, selected_ids, chunk_size, total_frames, temporal_dim=2,
-        ).to(dtype=model_dtype)
-        hidden_states = history.clone()
-        hidden_states[:, :, -active_frames:] = noisy_chunk.to(dtype=model_dtype)
-        frame_timesteps = sigma.new_zeros((batch_size, history.shape[2]))
-        frame_timesteps[:, -active_frames:] = sigma[:, None] * 1000.0
-        token_timesteps = build_token_timesteps(frame_timesteps, hidden_states, model)
-        model_kwargs = dict(
-            hidden_states=hidden_states,
-            clean_video_latent=history,
-            timestep=token_timesteps,
-            encoder_hidden_states=prompt_embeds,
-            encoder_hidden_states_mask=prompt_embeds_mask,
-            noisy_temporal_ids=temporal_ids,
-            ref_image_latent=ref_image_latent,
-            return_dict=False,
-        )
-        if ref_video_latent is not None:
-            model_kwargs["ref_video_latent"] = pipeline._gather_window_tensor(
-                ref_video_latent, selected_ids, chunk_size, total_frames, temporal_dim=2,
-            ).to(dtype=model_dtype)
-        with model.cache_context("cond"):
-            prediction = model(**model_kwargs)[0][:, :, -active_frames:]
-        clean_chunk = (noisy_chunk - sigma_view * prediction.to(dtype=dtype)).detach()
-        generated_history[:, :, chunk_start:chunk_end] = clean_chunk
-
-    generated_history = generated_history.detach()
-    return generated_history
+    model.reset_inference_kv_cache()
+    try:
+        for window in chunk_windows:
+            chunk_index = window["chunk_idx"]
+            chunk_start, chunk_end = window["chunk_start"], window["chunk_end"]
+            history_ids = window["selected_chunk_ids"][:-1]
+            temporal_ids = pipeline._gather_window_temporal_ids(
+                [chunk_index], chunk_size, total_frames, device, relative=False,
+            ).unsqueeze(0).expand(batch_size, -1)
+            sigma = chunk_sigmas[:, chunk_index]
+            sigma_view = sigma.view(batch_size, 1, 1, 1, 1)
+            target_chunk = clean_target[:, :, chunk_start:chunk_end]
+            noisy_chunk = (1.0 - sigma_view) * target_chunk + sigma_view * noise[:, :, chunk_start:chunk_end]
+            cache_ids = [pipeline._kv_cache_memory_id("clean", cid) for cid in history_ids]
+            model_kwargs = dict(
+                hidden_states=noisy_chunk.to(dtype=model_dtype),
+                timestep=sigma * 1000.0,
+                encoder_hidden_states=prompt_embeds,
+                encoder_hidden_states_mask=prompt_embeds_mask,
+                noisy_temporal_ids=temporal_ids,
+                ref_image_latent=ref_image_latent,
+                kv_cache_mode="reuse",
+                kv_cache_scope="cond",
+                kv_cache_chunk_id=chunk_index,
+                kv_cache_selected_chunk_ids=cache_ids,
+                return_dict=False,
+            )
+            if ref_video_latent is not None:
+                model_kwargs["ref_video_latent"] = pipeline._gather_window_tensor(
+                    ref_video_latent, [chunk_index], chunk_size, total_frames, temporal_dim=2,
+                ).to(dtype=model_dtype)
+            with model.cache_context("cond"):
+                prediction = model(**model_kwargs)[0]
+            clean_chunk = (noisy_chunk - sigma_view * prediction.to(dtype=dtype)).detach()
+            generated_history[:, :, chunk_start:chunk_end] = clean_chunk
+            if chunk_index + 1 < len(chunk_windows):
+                pipeline._store_clean_chunk_kv_cache(
+                    model,
+                    clean_chunk_latents=clean_chunk.to(dtype=model_dtype),
+                    chunk_temporal_ids=temporal_ids,
+                    prompt_embeds=prompt_embeds,
+                    prompt_embeds_mask=prompt_embeds_mask,
+                    negative_prompt_embeds=None,
+                    negative_prompt_embeds_mask=None,
+                    active_chunk_id=chunk_index,
+                    history_chunk_ids=history_ids,
+                )
+                next_ids = chunk_windows[chunk_index + 1]["selected_chunk_ids"][:-1]
+                model.evict_kv_cache_chunks({pipeline._kv_cache_memory_id("clean", cid) for cid in next_ids})
+    finally:
+        model.reset_inference_kv_cache()
+    return generated_history.detach()
 
 
 def prepare_forcing_inputs(

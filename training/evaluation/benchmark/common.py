@@ -52,8 +52,8 @@ def build_parser(description: str, num_frames: int) -> argparse.ArgumentParser:
     parser.add_argument("--use-relative-rope", action="store_true", help="Use dense window positions when no temporal ceiling is set.")
     parser.add_argument("--max-temporal-ids", type=parse_temporal_id_ceiling, default=8, help="Temporal RoPE ceiling, independent of relative RoPE; use none to disable.")
     parser.add_argument(
-        "--store-clean-only-self", action=argparse.BooleanOptionalAction, default=True,
-        help="Store clean history chunks with isolated self-attention (default: enabled).",
+        "--store-clean-only-self", action=argparse.BooleanOptionalAction, default=None,
+        help="Store clean history chunks with isolated self-attention; defaults to the supplied config.",
     )
     return parser
 

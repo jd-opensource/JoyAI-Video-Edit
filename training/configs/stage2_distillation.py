@@ -157,6 +157,7 @@ class Stage2DistillationConfig(ExpConfig):
     teacher_forcing_noise_max_sigma: float = 0.003
     num_inference_steps: int = 2
     guidance_scale: float = 1.0
+    store_clean_only_self: bool = True
     hsdp_shard_dim: int = 1
     reshard_after_forward: bool = True
     dmd_stage1_ckpt: str | None = field(default_factory=lambda: os.getenv("JOYAI_STAGE1_CKPT", "checkpoints/stage1.pth"))

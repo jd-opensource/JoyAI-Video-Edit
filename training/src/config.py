@@ -58,6 +58,7 @@ class ExpConfig:
     pipeline_arch_config: dict[str, Any] | None = None
     num_inference_steps: int = 30
     guidance_scale: float = 7.5
+    store_clean_only_self: bool = False
 
     # Scheduler
     scheduler_arch_config: dict[str, Any] | None = None

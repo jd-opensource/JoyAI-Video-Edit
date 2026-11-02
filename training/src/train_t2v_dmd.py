@@ -775,11 +775,7 @@ def _prepare_score_additional_inputs(
 ) -> dict[str, Any]:
     """Score generated samples with their detached generated history."""
     score_inputs = dict(additional_inputs)
-    clean_latents = generated_latents.detach()
-    history_latents = score_inputs.pop("score_history_latent", None)
-    if history_latents is not None:
-        clean_latents = torch.cat([history_latents.detach(), clean_latents], dim=2)
-    score_inputs["clean_video_latent"] = clean_latents
+    score_inputs["clean_video_latent"] = generated_latents.detach()
     return score_inputs
 
 
@@ -796,16 +792,9 @@ def score_flow_prediction(
     noisy_latents = noisy_latents.to(dtype=model.dtype)
     prompt_embeds = prompt_embeds.to(dtype=model.dtype)
 
-    history_frames = 0
     clean_video_latent = additional_inputs.get("clean_video_latent")
     if clean_video_latent is not None:
         clean_video_latent = clean_video_latent.to(dtype=model.dtype)
-        history_frames = clean_video_latent.shape[2] - noisy_latents.shape[2]
-        if history_frames < 0:
-            raise ValueError("Score clean history must include every target frame.")
-        if history_frames:
-            noisy_latents = torch.cat([clean_video_latent[:, :, :history_frames], noisy_latents], dim=2)
-            timesteps = F.pad(timesteps, (history_frames, 0), value=0)
     ref_video_latent = additional_inputs.get("ref_video_latent")
     if ref_video_latent is not None:
         ref_video_latent = ref_video_latent.to(dtype=model.dtype)
@@ -827,14 +816,12 @@ def score_flow_prediction(
     )
     if clean_video_latent is not None:
         model_kwargs["clean_video_latent"] = clean_video_latent
-    if additional_inputs.get("noisy_temporal_ids") is not None:
-        model_kwargs["noisy_temporal_ids"] = additional_inputs["noisy_temporal_ids"]
     if ref_video_latent is not None:
         model_kwargs["ref_video_latent"] = ref_video_latent
     if ref_image_latent is not None:
         model_kwargs["ref_image_latent"] = ref_image_latent
 
-    return model(**model_kwargs)[0][:, :, history_frames:]
+    return model(**model_kwargs)[0]
 
 
 def _sample_score_inputs(
@@ -1180,21 +1167,11 @@ def generate_dmd_latents(
     def score_overrides(
         latents: torch.Tensor, chunk_ids: list[int], chunk_frames: list[int],
     ) -> dict[str, Any]:
-        history_ids = chunk_windows[chunk_ids[0]]["selected_chunk_ids"][:-1]
-        score_chunk_ids = history_ids + chunk_ids
-        overrides: dict[str, Any] = {
-            "noisy_temporal_ids": pipeline._gather_window_temporal_ids(
-                score_chunk_ids, chunk_size, total_frames, device, relative=False,
-            ),
-        }
-        if history_ids:
-            overrides["score_history_latent"] = pipeline._gather_window_tensor(
-                context_latents, history_ids, chunk_size, total_frames, temporal_dim=2,
-            ).detach()
+        overrides: dict[str, Any] = {}
         if use_long_rollout:
             overrides["loss_normalizer"] = context_latents.numel()
         if source_latents is not None:
-            overrides["ref_video_latent"] = _gather_ref_chunks(source_latents, score_chunk_ids, chunk_size, num_source_chunks)
+            overrides["ref_video_latent"] = _gather_ref_chunks(source_latents, chunk_ids, chunk_size, num_source_chunks)
         if controller is not None:
             weights = controller.group_anchor_w(
                 chunk_ids, chunk_frames, batch=latents.shape[0], device=device,

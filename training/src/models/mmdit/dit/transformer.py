@@ -105,6 +105,41 @@ def _run_flash_or_sdpa(
         return _sdpa_attention(query, key, value, attention_mask=attention_mask)
 
 
+def _cached_attention_plan(query_types, key_types, query_valid, key_valid):
+    query_reference = query_types == 1
+    key_reference = key_types == 1
+    if bool(query_valid.all() & key_valid.all()) and (
+        not bool(query_reference.any()) or bool(key_reference.all())
+    ):
+        return None
+    groups = []
+    for batch_idx in range(query_types.shape[0]):
+        for reference_only in (False, True):
+            queries = query_valid[batch_idx] & (query_reference[batch_idx] == reference_only)
+            keys = key_valid[batch_idx]
+            if reference_only:
+                keys = keys & key_reference[batch_idx]
+            query_indices = queries.nonzero(as_tuple=True)[0]
+            key_indices = keys.nonzero(as_tuple=True)[0]
+            if query_indices.numel() and key_indices.numel():
+                groups.append((batch_idx, query_indices, key_indices))
+    return groups
+
+
+def _run_cached_attention(query, key, value, plan):
+    if plan is None:
+        return _run_flash_or_sdpa(query, key, value)
+    output = torch.zeros_like(query)
+    for batch_idx, query_indices, key_indices in plan:
+        attended = _run_flash_or_sdpa(
+            query[batch_idx:batch_idx + 1].index_select(1, query_indices),
+            key[batch_idx:batch_idx + 1].index_select(1, key_indices),
+            value[batch_idx:batch_idx + 1].index_select(1, key_indices),
+        )
+        output[batch_idx].index_copy_(0, query_indices, attended[0])
+    return output
+
+
 def _get_flex_kernel_options() -> Optional[Dict[str, Any]]:
     if not _FLEX_LOW_RESOURCE:
         return None
@@ -374,6 +409,7 @@ class MMDoubleStreamBlock(nn.Module):
         kv_cache_pre_rope: bool = False,
         cached_freqs_cis: Optional[tuple] = None,
         text_vec_indices: Optional[torch.Tensor] = None,
+        cached_attention_plan=None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         img_modulation = _run_stream_modulation(self.img_mod, vec)
         if vec.ndim == 4:
@@ -437,7 +473,7 @@ class MMDoubleStreamBlock(nn.Module):
                 if cached_key is not None:
                     key = torch.cat((cached_key, key), dim=1)
                     value = torch.cat((cached_value, value), dim=1)
-            attn = _run_flash_or_sdpa(query, key, value)
+            attn = _run_cached_attention(query, key, value, cached_attention_plan)
         else:
             attn = _run_flex_or_sdpa(query, key, value, block_mask, attention_mask)
 
@@ -672,6 +708,9 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         layer_idx: Optional[int],
         key: torch.Tensor,
         value: torch.Tensor,
+        *,
+        token_types: torch.Tensor,
+        valid_tokens: torch.Tensor,
     ) -> None:
         scope_store = self._get_cache_scope_store()
         if scope_store is None or layer_idx is None or self._kv_cache_chunk_id is None:
@@ -681,6 +720,8 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
             "key": key.detach().clone(),
             "value": value.detach().clone(),
             "pre_rope": bool(self._kv_cache_pre_rope),
+            "token_types": token_types.detach().clone(),
+            "valid_tokens": valid_tokens.detach().clone(),
         }
 
     def evict_kv_cache_chunks(self, chunk_ids_to_keep: set[int]) -> None:
@@ -1256,6 +1297,8 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
             new_sin = sin_3d * cos_role + cos_3d * sin_role
             vis_freqs_cis = (new_cos, new_sin)
 
+        if timestep.ndim == 1 and any(latent is not None for latent in ref_image_latents):
+            timestep = timestep[:, None].expand(-1, noisy_seq_len)
         if timestep.ndim == 2:
             if timestep.shape[0] != batch_size:
                 raise ValueError(f"`timestep` batch size {timestep.shape[0]} does not match {batch_size}.")
@@ -1347,7 +1390,15 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         attention_mask = None
         block_mask = None
         use_kv_cache = kv_cache_mode is not None
-        if not use_kv_cache:
+        cached_plan = None
+        if use_kv_cache:
+            query_types = visual_token_types if skip_text_stream else full_token_types
+            query_valid = visual_hidden_mask if skip_text_stream else full_hidden_mask
+            entries = self._read_layer_kv_cache(0) if kv_cache_mode in {"reuse", "reuse_store"} else []
+            key_types = torch.cat([*(entry["token_types"].to(device) for entry in entries), query_types], dim=1)
+            key_valid = torch.cat([*(entry["valid_tokens"].to(device) for entry in entries), query_valid], dim=1)
+            cached_plan = _cached_attention_plan(query_types, key_types, query_valid, key_valid)
+        else:
             mask_kwargs = dict(
                 frame_ids=full_frame_ids,
                 token_types=full_token_types,
@@ -1403,10 +1454,13 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
             if use_kv_cache:
                 block_kwargs.update(
                     kv_cache_reader=self._read_layer_kv_cache if kv_cache_mode in {"reuse", "reuse_store"} else None,
-                    kv_cache_writer=self._write_layer_kv_cache if kv_cache_mode in {"store", "reuse_store"} else None,
+                    kv_cache_writer=(lambda layer, key, value: self._write_layer_kv_cache(
+                        layer, key, value, token_types=visual_token_types, valid_tokens=visual_hidden_mask,
+                    )) if kv_cache_mode in {"store", "reuse_store"} else None,
                     skip_text=skip_text_stream,
                     kv_cache_pre_rope=kv_cache_pre_rope,
                     cached_freqs_cis=cached_freqs_cis,
+                    cached_attention_plan=cached_plan,
                 )
             img, txt = block(
                 img,

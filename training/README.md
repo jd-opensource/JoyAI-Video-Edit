@@ -87,6 +87,8 @@ Bucket tuples are `(batch_size, num_items, num_frames, height, width)`. Images a
 
 The long-horizon config inherits shared settings from `configs/stage2_distillation.py` and overrides only its resume path, experiment name, generator learning rate, rollout length, and temporal positions.
 
+Each score segment uses its own first chunk as the sink and temporal positions starting at zero. Source-video segments follow the corresponding positions in the full rollout.
+
 `max_temporal_ids` sets a temporal position ceiling independently of `dmd_rollout_use_relative_temporal_ids`. When a window exceeds the ceiling, its absolute positions shift down and values below zero are floored at zero (for example, `0,49,50` becomes `0,7,8` with a ceiling of 8). Without a ceiling, `dmd_rollout_use_relative_temporal_ids=True` uses dense window positions and `False` retains absolute positions. The default ceilings are 2 for short rollouts and 8 for long rollouts.
 
 ### Stage1 → Stage2
@@ -156,6 +158,8 @@ Override inference settings with `INFERENCE_STEP`, `CFG`, `SRC_CFG`, and `RESOLU
 
 Benchmark inference runs an independent, unsharded model on each GPU and assigns different videos to each rank.
 
+Clean-cache writes read history for Stage1 and use isolated self-attention for Stage2. The config field `store_clean_only_self` selects this behavior; `--store-clean-only-self` and `--no-store-clean-only-self` override it.
+
 `MAX_TEMPORAL_IDS` sets the inference ceiling independently of `USE_RELATIVE_ROPE`. Set `MAX_TEMPORAL_IDS=none` (or pass `--max-temporal-ids none`) to disable the ceiling. The benchmark scripts default to 8; set `MAX_TEMPORAL_IDS=2` when evaluating the default short-rollout model.
 
 ### Evaluation
@@ -182,13 +186,4 @@ We thank the authors and contributors of the following projects for sharing thei
 
 ## Citation
 
-If you find this project helpful, please cite:
-
-```bibtex
-@article{xiao2026joyai,
-  title={JoyAI-Video-Edit: Real-Time Open-Ended Video Editing with Autoregressive Diffusion},
-  author={Xiao, Yicheng and Dai, Wenxun and Qin, Xinran and Song, Lin and Zhang, Maoquan and Xu, Hang and Chen, Yukang and Li, Yitong and Zhang, Guohui and Zhang, Yuan and Zhang, Xuying and Zhang, Tommy and Yuan, Jianlong and Li, Peihao and Lu, Shuai and Fu, Siming and Zhao, Chuyang and Han, Xin and Huang, Jie and Li, Wenbo and Ma, Guoqing and Huang, Wei and Qi, Xiaojuan and Huang, Haoyang and Duan, Nan},
-  journal={arXiv preprint arXiv:2608.03974},
-  year={2026}
-}
-```
+If you find this project helpful, please use the citation in the [project README](../README.md).

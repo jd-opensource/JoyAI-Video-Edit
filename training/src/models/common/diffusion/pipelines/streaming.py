@@ -751,9 +751,11 @@ class Pipeline(DiffusionPipeline):
         global_sink_chunk: Optional[bool] = None,
         use_relative_temporal_ids: bool = False,
         max_temporal_ids: Optional[int] = None,
-        store_clean_only_self: bool = True,
+        store_clean_only_self: Optional[bool] = None,
     ):
         """Generate pixels or latents with a bounded KV cache and boundary-frame VAE handoff."""
+        if store_clean_only_self is None:
+            store_clean_only_self = getattr(self.args, "store_clean_only_self", False)
         self.check_inputs(
             prompt, height, width, num_frames,
             images=images,

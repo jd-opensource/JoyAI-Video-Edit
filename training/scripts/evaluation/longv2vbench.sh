@@ -18,9 +18,9 @@ EXTRA_ARGS=()
 if [[ "${USE_RELATIVE_ROPE:-True}" == "True" ]]; then
     EXTRA_ARGS+=(--use-relative-rope)
 fi
-if [[ "${STORE_CLEAN_ONLY_SELF:-True}" == "True" ]]; then
+if [[ "${STORE_CLEAN_ONLY_SELF:-}" == "True" ]]; then
     EXTRA_ARGS+=(--store-clean-only-self)
-else
+elif [[ "${STORE_CLEAN_ONLY_SELF:-}" == "False" ]]; then
     EXTRA_ARGS+=(--no-store-clean-only-self)
 fi
 if [[ -n "${INFERENCE_STEP:-}" ]]; then
