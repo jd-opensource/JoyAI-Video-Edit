@@ -83,7 +83,7 @@ class Pipeline(DiffusionPipeline):
         self.vae_scale_factor_temporal = self.vae.ffactor_temporal
 
 
-        text_encoder_ckpt = dict(args.text_encoder_arch_config.get("params", {}))['text_encoder_ckpt']
+        text_encoder_ckpt = args.text_encoder_arch_config["params"]["text_encoder_ckpt"]
         self.qwen_processor = AutoProcessor.from_pretrained(text_encoder_ckpt, local_files_only=True)
 
         self.prompt_template_encode = {
@@ -96,14 +96,6 @@ class Pipeline(DiffusionPipeline):
             'multiple_images': 34,
             'video': 91,
         }
-
-    def _extract_masked_hidden(self, hidden_states: torch.Tensor, mask: torch.Tensor):
-        bool_mask = mask.bool()
-        valid_lengths = bool_mask.sum(dim=1)
-        selected = hidden_states[bool_mask]
-        split_result = torch.split(selected, valid_lengths.tolist(), dim=0)
-
-        return split_result
 
     def _get_qwen_prompt_embeds(
         self,
@@ -129,33 +121,21 @@ class Pipeline(DiffusionPipeline):
             output_hidden_states=False,
             return_dict=True,
         )
-        hidden_states = encoder_hidden_states.last_hidden_state
-        split_hidden_states = self._extract_masked_hidden(
-            hidden_states, txt_tokens.attention_mask)
-        split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
-        attn_mask_list = [torch.ones(
-            e.size(0), dtype=torch.long, device=e.device) for e in split_hidden_states]
-        max_seq_len = min(
-            max_sequence_length,
-            max(u.size(0) for u in split_hidden_states),
-        )
-        prompt_embeds = torch.stack(
-            [torch.cat([u, u.new_zeros(max_seq_len - u.size(0), u.size(1))])
-             for u in split_hidden_states]
-        )
-        encoder_attention_mask = torch.stack(
-            [torch.cat([u, u.new_zeros(max_seq_len - u.size(0))])
-             for u in attn_mask_list]
-        )
-
-        return prompt_embeds, encoder_attention_mask
+        mask = txt_tokens.attention_mask.bool()
+        lengths = mask.sum(dim=1)
+        hidden = torch.split(encoder_hidden_states.last_hidden_state[mask], lengths.tolist())
+        hidden = [sample[drop_idx:] for sample in hidden]
+        prompt_embeds = torch.nn.utils.rnn.pad_sequence(hidden, batch_first=True)
+        lengths = (lengths - drop_idx).clamp_min(0)
+        prompt_mask = torch.arange(prompt_embeds.shape[1], device=device)[None, :] < lengths[:, None]
+        return prompt_embeds, prompt_mask.to(txt_tokens.attention_mask.dtype)
 
 
     def encode_prompt_multiple_images(
         self,
         prompt: List[str],
         device: Optional[torch.device] = None,
-        images: Optional[torch.Tensor | List[Image.Image] | List[torch.Tensor]] = None,
+        images: Optional[List[Image.Image]] = None,
         max_sequence_length: int = 1024,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         device = device or self._execution_device
@@ -165,42 +145,13 @@ class Pipeline(DiffusionPipeline):
             '<image>\n', '<|vision_start|><|image_pad|><|vision_end|>') for p in prompt]
         prompt = [template.format(p) for p in prompt]
 
-        VIT_FIXED_SIZE = 512
-        target_area = VIT_FIXED_SIZE * VIT_FIXED_SIZE
-
-        def _vit_hw(h: int, w: int) -> Tuple[int, int]:
-            scale = (target_area / max(h * w, 1)) ** 0.5
-            return max(1, int(round(h * scale))), max(1, int(round(w * scale)))
-
         if images is not None:
-            import torch.nn.functional as _F
-
-            def _resize_tensor(t: torch.Tensor) -> torch.Tensor:
-                squeeze = t.dim() == 3
-                if squeeze:
-                    t = t.unsqueeze(0)
-                new_h, new_w = _vit_hw(t.shape[-2], t.shape[-1])
-                t = _F.interpolate(
-                    t.float(), size=(new_h, new_w),
-                    mode="bilinear", align_corners=False,
-                ).to(t.dtype)
-                if squeeze:
-                    t = t.squeeze(0)
-                return t
-
-            if isinstance(images, torch.Tensor):
-                images = _resize_tensor(images)
-            elif isinstance(images, list):
-                resized = []
-                for img in images:
-                    if isinstance(img, Image.Image):
-                        new_h, new_w = _vit_hw(img.height, img.width)
-                        resized.append(img.resize((new_w, new_h), Image.BILINEAR))
-                    elif isinstance(img, torch.Tensor):
-                        resized.append(_resize_tensor(img))
-                    else:
-                        resized.append(img)
-                images = resized
+            resized = []
+            for image in images:
+                scale = (512 ** 2 / (image.height * image.width)) ** 0.5
+                size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+                resized.append(image.resize(size, Image.BILINEAR))
+            images = resized
 
         inputs = self.qwen_processor(
             text=prompt,
@@ -235,38 +186,26 @@ class Pipeline(DiffusionPipeline):
         template_type: str = 'image',
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Encode text or reference-image prompts and their attention masks."""
-        if images is not None:
-            prompt_embeds, prompt_embeds_mask = self.encode_prompt_multiple_images(
-                prompt=prompt,
-                images=images,
-                device=device,
-                max_sequence_length=max_sequence_length,
-            )
-        else:
-            device = device or self._execution_device
-
+        if prompt_embeds is None:
             prompt = [prompt] if isinstance(prompt, str) else prompt
-            batch_size = len(prompt) if prompt_embeds is None else prompt_embeds.shape[0]
-
-            if prompt_embeds is None:
+            if images is not None:
+                prompt_embeds, prompt_embeds_mask = self.encode_prompt_multiple_images(
+                    prompt=prompt,
+                    images=images,
+                    device=device,
+                    max_sequence_length=max_sequence_length,
+                )
+            else:
                 prompt_embeds, prompt_embeds_mask = self._get_qwen_prompt_embeds(
                     prompt,
                     template_type,
                     device,
                     max_sequence_length=max_sequence_length,
                 )
-            prompt_embeds = prompt_embeds[:, :max_sequence_length]
-            prompt_embeds_mask = prompt_embeds_mask[:, :max_sequence_length]
-            _, seq_len, _ = prompt_embeds.shape
-            prompt_embeds = prompt_embeds.repeat(1, num_videos_per_prompt, 1)
-            prompt_embeds = prompt_embeds.view(
-                batch_size * num_videos_per_prompt, seq_len, -1)
-            prompt_embeds_mask = prompt_embeds_mask.repeat(
-                1, num_videos_per_prompt, 1)
-            prompt_embeds_mask = prompt_embeds_mask.view(
-                batch_size * num_videos_per_prompt, seq_len)
-
-        return prompt_embeds, prompt_embeds_mask
+        return (
+            prompt_embeds[:, :max_sequence_length].repeat_interleave(num_videos_per_prompt, dim=0),
+            prompt_embeds_mask[:, :max_sequence_length].repeat_interleave(num_videos_per_prompt, dim=0),
+        )
 
 
     def check_inputs(
@@ -405,20 +344,12 @@ class Pipeline(DiffusionPipeline):
         enable_denormalization: bool,
         generator: Optional[torch.Generator] = None,
     ) -> torch.Tensor:
-        is_causal = getattr(self.transformer.config, "causal", False)
-        dit_chunk_size = getattr(self.transformer.config, "chunk_size", None)
+        dit_chunk_size = self.transformer.config.chunk_size
         total_t = inputs.shape[2]
         if (total_t - 1) % self.vae.ffactor_temporal:
             raise ValueError(f"Reference videos must contain {self.vae.ffactor_temporal}n+1 frames, got {total_t}.")
 
-        use_chunkwise = (
-            is_causal
-            and dit_chunk_size is not None
-            and dit_chunk_size > 0
-            and total_t > 1
-        )
-
-        if use_chunkwise:
+        if total_t > 1:
             ffactor_t = self.vae.ffactor_temporal
             window_pixels = dit_chunk_size * ffactor_t
             window_frames = 1 + window_pixels
@@ -463,7 +394,6 @@ class Pipeline(DiffusionPipeline):
     def prepare_latents(
         self,
         batch_size,
-        num_items,
         num_channels_latents,
         height,
         width,
@@ -479,7 +409,7 @@ class Pipeline(DiffusionPipeline):
 
         shape = (
             batch_size,
-            num_items,
+            1,
             num_channels_latents,
             latent_temporal,
             int(height) // self.vae_scale_factor,
@@ -491,74 +421,34 @@ class Pipeline(DiffusionPipeline):
                 f" size of {batch_size}. Make sure the batch size matches the length of the generators."
             )
 
+        reference_latents = None
+        if reference_visual_content is not None:
+            if reference_visual_content.ndim == 5:
+                reference_visual_content = reference_visual_content.unsqueeze(0)
+            elif reference_visual_content.ndim == 7:
+                if reference_visual_content.shape[3] != 1:
+                    raise ValueError("7D `reference_visual_content` must have a singleton frame-group dimension.")
+                reference_visual_content = reference_visual_content.squeeze(3)
+            if reference_visual_content.shape[0] != batch_size or reference_visual_content.shape[1] <= 0:
+                raise ValueError(f"Reference videos must have batch size {batch_size} and at least one reference.")
+            ref_video = rearrange(
+                reference_visual_content.to(device=device, dtype=dtype), "b n c t h w -> (b n) c t h w",
+            )
+            reference_latents = self._sample_vae_latents(
+                ref_video, enable_denormalization=enable_denormalization,
+            )
+            reference_latents = rearrange(
+                reference_latents, "(b n) c t h w -> b n c t h w", b=batch_size,
+            ).cpu()
+            if reference_latents.shape[2:] != shape[2:]:
+                raise ValueError(f"Reference latent shape must be {shape[2:]}, got {tuple(reference_latents.shape[2:])}.")
         if latents is None:
-            if reference_visual_content is not None:
-                num_reference_items = num_items - 1
-                if num_reference_items <= 0:
-                    raise ValueError(
-                        "`reference_visual_content` was provided, but `num_items` does not include any "
-                        "reference slots. Please pass matching `images` as reference items."
-                    )
-                if reference_visual_content.ndim == 5:
-                    if batch_size != 1:
-                        raise ValueError(
-                            "5D `reference_visual_content` is only supported when batch_size == 1. "
-                            "For batched inference, pass shape `(batch, num_refs, c, t, h, w)`."
-                        )
-                    reference_visual_content = reference_visual_content.unsqueeze(0)
-                elif reference_visual_content.ndim == 7:
-                    if reference_visual_content.shape[3] != 1:
-                        raise ValueError(
-                            "7D `reference_visual_content` is expected to have a singleton "
-                            "frame-group dimension at index 3."
-                        )
-                    reference_visual_content = reference_visual_content.squeeze(3)
-
-                if reference_visual_content.shape[:2] != (batch_size, num_reference_items):
-                    raise ValueError(
-                        "`reference_visual_content` shape does not match the requested "
-                        "batch/reference "
-                        f"layout. Expected leading dims {(batch_size, num_reference_items)}, "
-                        f"got {tuple(reference_visual_content.shape[:2])}."
-                    )
-
-                reference_visual_content = reference_visual_content.to(device=device, dtype=dtype)
-                ref_video = rearrange(
-                    reference_visual_content, "b n c t h w -> (b n) c t h w")
-                ref_vae = self._sample_vae_latents(
-                    ref_video,
-                    enable_denormalization=enable_denormalization,
-                )
-                ref_vae = rearrange(
-                    ref_vae,
-                    "(b n) c t h w -> b n c t h w",
-                    b=batch_size,
-                    n=num_reference_items,
-                )
-                if ref_vae.shape[2:] != shape[2:]:
-                    raise ValueError(
-                        "Encoded `reference_visual_content` latents do not match the target "
-                        "latent "
-                        f"shape. Expected {shape[2:]}, got {tuple(ref_vae.shape[2:])}."
-                    )
-                noise = randn_tensor(
-                    (shape[0], 1, *shape[2:]),
-                    generator=generator,
-                    device=ref_vae.device,
-                    dtype=ref_vae.dtype,
-                )
-                ref_latents_cpu = ref_vae.cpu()
-                latents = noise.cpu()
-            else:
-                latents = randn_tensor(
-                    shape, generator=generator, device=device, dtype=dtype
-                ).cpu()
-                ref_latents_cpu = None
+            latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+        elif tuple(latents.shape) != shape:
+            raise ValueError(f"Target latent shape must be {shape}, got {tuple(latents.shape)}.")
         else:
-            latents = latents.cpu()
-            ref_latents_cpu = None
-
-        return latents, ref_latents_cpu
+            latents = latents.clone()
+        return latents.cpu(), reference_latents
 
     @property
     def guidance_scale(self):
@@ -628,30 +518,17 @@ class Pipeline(DiffusionPipeline):
         max_temporal_ids: Optional[int] = None,
     ) -> torch.Tensor:
         """Apply a ceiling independently of relative window numbering."""
-        if max_temporal_ids is not None:
-            if max_temporal_ids < 2 * chunk_size:
-                raise ValueError("`max_temporal_ids` must be at least twice `chunk_size` to keep sink/history/active chunks distinct.")
-            abs_ids = []
-            for cid in selected_chunk_ids:
-                frame_start, frame_end = cls._chunk_frame_bounds(cid, chunk_size, total_latent_frames)
-                abs_ids.append(torch.arange(frame_start, frame_end, device=device, dtype=torch.long))
-            abs_ids = torch.cat(abs_ids, dim=0)
-            shift = (abs_ids.max() - int(max_temporal_ids)).clamp_min(0)
-            return (abs_ids - shift).clamp_min(0)
-        if relative:
-            temporal_ids = []
-            offset = 0
-            for cid in selected_chunk_ids:
-                frame_start, frame_end = cls._chunk_frame_bounds(cid, chunk_size, total_latent_frames)
-                chunk_len = frame_end - frame_start
-                temporal_ids.append(torch.arange(offset, offset + chunk_len, device=device, dtype=torch.long))
-                offset += chunk_len
-            return torch.cat(temporal_ids, dim=0)
         temporal_ids = []
         for cid in selected_chunk_ids:
             frame_start, frame_end = cls._chunk_frame_bounds(cid, chunk_size, total_latent_frames)
             temporal_ids.append(torch.arange(frame_start, frame_end, device=device, dtype=torch.long))
-        return torch.cat(temporal_ids, dim=0)
+        temporal_ids = torch.cat(temporal_ids, dim=0)
+        if max_temporal_ids is not None:
+            if max_temporal_ids < 2 * chunk_size:
+                raise ValueError("`max_temporal_ids` must be at least twice `chunk_size` to keep sink/history/active chunks distinct.")
+            shift = (temporal_ids.max() - max_temporal_ids).clamp_min(0)
+            return (temporal_ids - shift).clamp_min(0)
+        return torch.arange(temporal_ids.numel(), device=device) if relative else temporal_ids
 
     @classmethod
     def _gather_window_tensor(
@@ -722,20 +599,14 @@ class Pipeline(DiffusionPipeline):
         pre_rope: bool = False,
         cached_temporal_ids: Optional[torch.Tensor] = None,
     ) -> None:
-        if model is None or not hasattr(model, "configure_inference_kv_cache"):
-            return
-
-        batch_size = clean_chunk_latents.shape[0]
-        zero_timestep = torch.zeros(
-            (batch_size,),
-            device=clean_chunk_latents.device,
-            dtype=clean_chunk_latents.dtype,
-        )
-
-        def _run_store(scope_name, enc_states, enc_mask):
-
-
-            selected_chunk_ids = [self._kv_cache_memory_id("clean", cid) for cid in (history_chunk_ids or [])]
+        zero_timestep = clean_chunk_latents.new_zeros(clean_chunk_latents.shape[0])
+        selected_chunk_ids = [self._kv_cache_memory_id("clean", cid) for cid in (history_chunk_ids or [])]
+        for scope_name, enc_states, enc_mask in (
+            ("cond", prompt_embeds, prompt_embeds_mask),
+            ("uncond", negative_prompt_embeds, negative_prompt_embeds_mask),
+        ):
+            if enc_states is None:
+                continue
             with model.cache_context(scope_name):
                 model(
                     hidden_states=clean_chunk_latents,
@@ -753,21 +624,11 @@ class Pipeline(DiffusionPipeline):
                     return_dict=False,
                 )
 
-        _run_store("cond", prompt_embeds, prompt_embeds_mask)
-        if negative_prompt_embeds is not None:
-            _run_store("uncond", negative_prompt_embeds, negative_prompt_embeds_mask)
-
-
-    def _resolve_streaming_chunk_size(self, explicit_chunk_size: Optional[int], total_latent_frames: int) -> int:
+    def _resolve_streaming_chunk_size(self, explicit_chunk_size: Optional[int]) -> int:
         if explicit_chunk_size is not None:
             chunk_size = explicit_chunk_size
         else:
-            if not getattr(self.transformer.config, "causal", False):
-                chunk_size = total_latent_frames
-            else:
-                chunk_size = getattr(self.transformer.config, "chunk_size", None)
-                if chunk_size is None:
-                    chunk_size = total_latent_frames
+            chunk_size = self.transformer.config.chunk_size
         if chunk_size <= 0:
             raise ValueError(f"`chunk_size` must be positive, got {chunk_size}.")
         return chunk_size
@@ -779,9 +640,7 @@ class Pipeline(DiffusionPipeline):
     ) -> bool:
         if explicit_global_sink_chunk is not None:
             return explicit_global_sink_chunk
-        if transformer is None:
-            return False
-        return bool(getattr(transformer.config, "global_sink_chunk", False))
+        return transformer.config.global_sink_chunk
 
     @staticmethod
     def _autocast(device: torch.device, dtype: torch.dtype):
@@ -938,6 +797,8 @@ class Pipeline(DiffusionPipeline):
             if negative_prompt is None and negative_prompt_embeds is None:
                 image_tokens = "<image>\n" * len(images) if images is not None and use_vit else ""
                 negative_prompt = [f"<|im_start|>user\n{image_tokens}<|im_end|>\n"] * batch_size
+            if isinstance(negative_prompt, str):
+                negative_prompt = [negative_prompt] * batch_size
             negative_prompt_embeds, negative_prompt_embeds_mask = self.encode_prompt(
                 prompt=negative_prompt,
                 prompt_embeds=negative_prompt_embeds,
@@ -951,17 +812,18 @@ class Pipeline(DiffusionPipeline):
         else:
             negative_prompt_embeds = negative_prompt_embeds_mask = None
 
-        num_items = 1
         if reference_visual_content is not None:
-            num_items += reference_visual_content.shape[0 if reference_visual_content.ndim == 5 else 1]
+            if reference_visual_content.ndim == 5:
+                reference_visual_content = reference_visual_content.unsqueeze(0)
+            reference_visual_content = reference_visual_content.repeat_interleave(num_videos_per_prompt, dim=0)
         latents, reference_latents = self.prepare_latents(
-            batch_size * num_videos_per_prompt, num_items, self.vae.config.latent_channels,
+            batch_size * num_videos_per_prompt, self.vae.config.latent_channels,
             height, width, num_frames, prompt_embeds.dtype, device, generator, latents,
             reference_visual_content=reference_visual_content,
             enable_denormalization=enable_denormalization,
         )
         total_latent_frames = latents.shape[3]
-        chunk_size = self._resolve_streaming_chunk_size(chunk_size, total_latent_frames)
+        chunk_size = self._resolve_streaming_chunk_size(chunk_size)
         chunk_windows = self._get_chunk_windows(
             total_latent_frames, chunk_size,
             getattr(self.transformer.config, "local_window_size", window_size),
@@ -976,8 +838,9 @@ class Pipeline(DiffusionPipeline):
             reference_images = list(reference_images.split(1))
         if reference_images is not None:
             reference_images = [reference.to(dtype=target_dtype) if reference is not None else None for reference in reference_images]
+            reference_images = [reference for reference in reference_images for _ in range(num_videos_per_prompt)]
         prefill_reference = None
-        if reference_images is not None and all(reference is not None for reference in reference_images):
+        if reference_images and all(reference is not None for reference in reference_images) and len({tuple(reference.shape[1:]) for reference in reference_images}) == 1:
             stacked = torch.cat(reference_images, dim=0)
             if stacked.shape[0] == latents.shape[0]:
                 prefill_reference = stacked

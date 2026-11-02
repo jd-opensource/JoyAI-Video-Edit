@@ -50,7 +50,6 @@ class Stage1ARConfig(ExpConfig):
     enable_source_id_rope: bool = True
     source_id_rope_dim: int = 128
     source_id_rope_theta: float = 256.0
-    clean_use_noisy_source_id: bool = True
     vae_arch_config: dict = field(default_factory=lambda: {
         "target": "src.models.mmdit.vae.XVAEChunkCausal",
         "pretrained": os.getenv("JOYAI_VAE", "checkpoints/vae"),

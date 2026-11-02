@@ -8,8 +8,6 @@ from dataclasses import dataclass
 
 from einops import rearrange
 
-import numpy as np
-
 import torch
 
 from torch import Tensor, nn
@@ -19,63 +17,18 @@ import torch.nn.functional as F
 from diffusers.utils.torch_utils import randn_tensor
 
 class DiagonalGaussianDistribution:
-    def __init__(self, parameters: torch.Tensor, deterministic: bool = False):
-        if parameters.ndim == 3:
-            dim = 2
-        elif parameters.ndim == 5 or parameters.ndim == 4:
-            dim = 1
-        else:
-            raise NotImplementedError
-        self.parameters = parameters
-        self.mean, self.logvar = torch.chunk(parameters, 2, dim=dim)
-        self.logvar = torch.clamp(self.logvar, -30.0, 20.0)
-        self.deterministic = deterministic
-        self.std = torch.exp(0.5 * self.logvar)
-        self.var = torch.exp(self.logvar)
-        if self.deterministic:
-            self.var = self.std = torch.zeros_like(
-                self.mean, device=self.parameters.device, dtype=self.parameters.dtype
-            )
+    def __init__(self, parameters: torch.Tensor):
+        self.mean, logvar = parameters.chunk(2, dim=1)
+        self.std = (0.5 * logvar.clamp(-30.0, 20.0)).exp()
 
     def sample(self, generator: torch.Generator | None = None) -> torch.Tensor:
         sample = randn_tensor(
             self.mean.shape,
             generator=generator,
-            device=self.parameters.device,
-            dtype=self.parameters.dtype,
+            device=self.mean.device,
+            dtype=self.mean.dtype,
         )
-        x = self.mean + self.std * sample
-        return x
-
-    def kl(self, other: "DiagonalGaussianDistribution" = None) -> torch.Tensor:
-        if self.deterministic:
-            return torch.Tensor([0.0])
-        else:
-            reduce_dim = list(range(1, self.mean.ndim))
-            if other is None:
-                return 0.5 * torch.sum(
-                    torch.pow(self.mean, 2) + self.var - 1.0 - self.logvar,
-                    dim=reduce_dim,
-                )
-            else:
-                return 0.5 * torch.sum(
-                    torch.pow(self.mean - other.mean, 2) / other.var +
-                    self.var / other.var -
-                    1.0 -
-                    self.logvar +
-                    other.logvar,
-                    dim=reduce_dim,
-                )
-
-    def nll(self, sample: torch.Tensor, dims: tuple[int, ...] = [1, 2, 3]) -> torch.Tensor:
-        if self.deterministic:
-            return torch.Tensor([0.0])
-        logtwopi = np.log(2.0 * np.pi)
-        return 0.5 * torch.sum(
-            logtwopi + self.logvar +
-            torch.pow(sample - self.mean, 2) / self.var,
-            dim=dims,
-        )
+        return self.mean + self.std * sample
 
     def mode(self) -> torch.Tensor:
         return self.mean
@@ -111,7 +64,6 @@ class AttnBlock(nn.Module):
 
     def __init__(self, in_channels: int):
         super().__init__()
-        self.in_channels = in_channels
 
         self.norm = RMSNorm(in_channels, channel_first=True, images=False)
         self.q = nn.Conv3d(in_channels, in_channels, kernel_size=1)
@@ -120,7 +72,7 @@ class AttnBlock(nn.Module):
         self.proj_out = nn.Conv3d(in_channels, in_channels, kernel_size=1)
 
     def attention(self, x: Tensor) -> Tensor:
-        b, c, t, h, w = x.shape
+        b, _, t, h, w = x.shape
 
         x = self.norm(x)
         q = self.q(x)

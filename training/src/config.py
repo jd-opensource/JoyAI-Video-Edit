@@ -95,7 +95,6 @@ class ExpConfig:
     ref_cfg_rate: float = 0.0
     use_vit: bool = False
 
-    clean_use_noisy_source_id: bool = True
     causal_forcing_strategy: str = "teacher_forcing"
     teacher_forcing_noise_max_sigma: float = 0.0
     teacher_forcing_noise_min_sigma: float = 0.0

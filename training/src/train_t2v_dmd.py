@@ -99,8 +99,6 @@ def _build_base_dit(cfg: ExpConfig, device: torch.device) -> torch.nn.Module:
     else:
         model_kwargs = {"dtype": dtype, "device": device, "args": cfg}
     model = build_from_config(cfg.dit_arch_config, **model_kwargs)
-    if hasattr(model, "materialize_meta_modules"):
-        model.materialize_meta_modules()
     if not dist.is_initialized() or dist.get_world_size() == 1:
         model.to(device=device)
 
@@ -1140,7 +1138,7 @@ def generate_dmd_latents(
     num_inference_steps = int(getattr(cfg, "dmd_generator_num_inference_steps", 2))
     pipeline.scheduler.set_timesteps(num_inference_steps, device=device)
     input_frames = latent_shape_like.shape[2]
-    chunk_size = pipeline._resolve_streaming_chunk_size(getattr(cfg, "dmd_generator_chunk_size", None), input_frames)
+    chunk_size = pipeline._resolve_streaming_chunk_size(getattr(cfg, "dmd_generator_chunk_size", None))
     rollout_chunks = rollout_num_chunks_override
     if rollout_chunks is None:
         rollout_chunks = getattr(cfg, "dmd_rollout_num_chunks", -1)

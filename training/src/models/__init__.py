@@ -181,8 +181,6 @@ def load_dit(cfg, device: torch.device, *, use_fsdp: bool = True) -> torch.nn.Mo
     else:
         model_kwargs = {'dtype': dtype, 'device': device, 'args': cfg}
     model = build_from_config(cfg.dit_arch_config, **model_kwargs)
-    if hasattr(model, "materialize_meta_modules"):
-        model.materialize_meta_modules()
     if not use_fsdp or not dist.is_initialized() or dist.get_world_size() == 1:
         model.to(device=device)
 
@@ -197,17 +195,6 @@ def load_dit(cfg, device: torch.device, *, use_fsdp: bool = True) -> torch.nn.Mo
                 and model.img_in.weight.shape != v.shape
             ):
                 v = v.reshape(model.img_in.weight.shape)
-            if (
-                k == "target_type_embed"
-                and hasattr(model, "noise_type_embed")
-            ):
-                load_state_dict["noise_type_embed"] = v
-            if (
-                k == "cond_type_embed"
-                and hasattr(model, "ref_video_type_embed")
-            ):
-                load_state_dict["ref_video_type_embed"] = v
-
             load_state_dict[k] = v
         strict = not use_pretrained_loading
         missing_keys, unexpected_keys = model.load_state_dict(load_state_dict, strict=strict)

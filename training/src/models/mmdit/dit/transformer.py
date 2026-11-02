@@ -124,12 +124,9 @@ def _run_flex_or_sdpa(
     value: torch.Tensor,
     block_mask: Optional[BlockMask],
     attention_mask: Optional[torch.Tensor],
-    lazy_dense_mask_fn: Optional[Callable[[], torch.Tensor]] = None,
 ) -> torch.Tensor:
     """Run chunk-causal attention."""
     if block_mask is None:
-        if attention_mask is None and lazy_dense_mask_fn is not None:
-            attention_mask = lazy_dense_mask_fn()
         return _sdpa_attention(query, key, value, attention_mask=attention_mask)
     if flex_attention is None:
         raise RuntimeError("A block mask requires flex_attention; use a dense mask for SDPA.")
@@ -303,13 +300,12 @@ class MMDoubleStreamBlock(nn.Module):
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
-        self.dit_modulation_type = dit_modulation_type
         self.heads_num = heads_num
         head_dim = hidden_size // heads_num
         mlp_hidden_dim = int(hidden_size * mlp_width_ratio)
 
         self.img_mod = load_modulation(
-            modulate_type=self.dit_modulation_type,
+            modulate_type=dit_modulation_type,
             hidden_size=hidden_size,
             factor=6,
             **factory_kwargs,
@@ -336,7 +332,7 @@ class MMDoubleStreamBlock(nn.Module):
                                    activation_fn="gelu-approximate")
 
         self.txt_mod = load_modulation(
-            modulate_type=self.dit_modulation_type,
+            modulate_type=dit_modulation_type,
             hidden_size=hidden_size,
             factor=6,
             **factory_kwargs,
@@ -503,7 +499,7 @@ class WanTimeTextImageEmbedding(nn.Module):
 
         encoder_hidden_states = self.text_embedder(encoder_hidden_states)
 
-        return temb, timestep_proj, encoder_hidden_states
+        return timestep_proj, encoder_hidden_states
 
 
 class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
@@ -536,7 +532,6 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         local_window_size: int = 4,
         global_sink_chunk: bool = True,
         causal: bool = True,
-        use_inference_kv_cache: bool = False,
     ):
         if not causal:
             raise ValueError("Only chunk-causal SFT, DMD rollouts, and streaming inference are supported; set `causal=True`.")
@@ -544,18 +539,14 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
             raise ValueError(f"`chunk_size` must be positive, got {chunk_size}.")
         if local_window_size <= 0:
             raise ValueError(f"`local_window_size` must be positive, got {local_window_size}.")
-        self.args = args
         self.out_channels = out_channels or in_channels
         self.patch_size = patch_size
         self.hidden_size = hidden_size
         self.heads_num = heads_num
         self.rope_dim_list = rope_dim_list
-        self.dit_modulation_type = dit_modulation_type
-        self.mm_double_blocks_depth = mm_double_blocks_depth
         self.rope_type = rope_type
         self.unpatchify_new = unpatchify_new
         self.theta = theta
-        self._initial_use_inference_kv_cache = use_inference_kv_cache
 
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
@@ -580,7 +571,7 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
                     self.hidden_size,
                     self.heads_num,
                     mlp_width_ratio=mlp_width_ratio,
-                    dit_modulation_type=self.dit_modulation_type,
+                    dit_modulation_type=dit_modulation_type,
                     **factory_kwargs,
                 )
                 for _ in range(mm_double_blocks_depth)
@@ -605,8 +596,7 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         )
 
         self.gradient_checkpointing = args.enable_activation_checkpointing
-        self._ensure_kv_cache_state()
-        self._use_inference_kv_cache = use_inference_kv_cache
+        self.reset_inference_kv_cache()
 
     def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
         # Ignore unsupported reference-projector and type-embedding weights.
@@ -628,27 +618,8 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         return super().load_state_dict(state_dict, strict=strict, assign=assign)
 
 
-    def _ensure_kv_cache_state(self) -> None:
-        if not hasattr(self, "_inference_kv_cache"):
-            self._inference_kv_cache = {"cond": {}, "uncond": {}}
-        if not hasattr(self, "_use_inference_kv_cache"):
-            self._use_inference_kv_cache = bool(getattr(self, "_initial_use_inference_kv_cache", False))
-        if not hasattr(self, "_kv_cache_mode"):
-            self._kv_cache_mode = None
-        if not hasattr(self, "_kv_cache_scope"):
-            self._kv_cache_scope = None
-        if not hasattr(self, "_kv_cache_chunk_id"):
-            self._kv_cache_chunk_id = None
-        if not hasattr(self, "_kv_cache_selected_chunk_ids"):
-            self._kv_cache_selected_chunk_ids = None
-        if not hasattr(self, "_kv_cache_pre_rope"):
-            self._kv_cache_pre_rope = False
-
     def reset_inference_kv_cache(self) -> None:
-        self._ensure_kv_cache_state()
         self._inference_kv_cache = {"cond": {}, "uncond": {}}
-        self._use_inference_kv_cache = bool(getattr(self.config, "use_inference_kv_cache", False))
-        self._kv_cache_mode = None
         self._kv_cache_scope = None
         self._kv_cache_chunk_id = None
         self._kv_cache_selected_chunk_ids = None
@@ -658,22 +629,17 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         self,
         *,
         scope: Optional[str],
-        mode: Optional[str],
         chunk_id: Optional[int] = None,
         selected_chunk_ids: Optional[list[int]] = None,
         pre_rope: bool = False,
     ) -> None:
-        self._ensure_kv_cache_state()
         self._kv_cache_scope = scope
-        self._kv_cache_mode = mode
         self._kv_cache_chunk_id = chunk_id
         self._kv_cache_selected_chunk_ids = list(selected_chunk_ids) if selected_chunk_ids is not None else None
-        self._use_inference_kv_cache = mode in {"reuse", "store", "reuse_store"}
         self._kv_cache_pre_rope = bool(pre_rope)
 
     @contextmanager
     def cache_context(self, scope: Optional[str]):
-        self._ensure_kv_cache_state()
         previous_scope = self._kv_cache_scope
         self._kv_cache_scope = scope
         try:
@@ -682,7 +648,6 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
             self._kv_cache_scope = previous_scope
 
     def _get_cache_scope_store(self) -> Optional[Dict[int, Dict[int, Dict[str, Any]]]]:
-        self._ensure_kv_cache_state()
         if self._kv_cache_scope is None:
             return None
         return self._inference_kv_cache.setdefault(self._kv_cache_scope, {})
@@ -718,15 +683,7 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
             "pre_rope": bool(self._kv_cache_pre_rope),
         }
 
-    def _get_inference_cache_chunk_ids(self, scope: Optional[str]) -> list[int]:
-        self._ensure_kv_cache_state()
-        if scope is None:
-            return []
-        scope_store = self._inference_kv_cache.get(scope, {})
-        return sorted(scope_store.keys())
-
     def evict_kv_cache_chunks(self, chunk_ids_to_keep: set[int]) -> None:
-        self._ensure_kv_cache_state()
         for scope in ("cond", "uncond"):
             scope_store = self._inference_kv_cache.get(scope)
             if scope_store is None:
@@ -777,7 +734,6 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
                 f"`frame_ids` length {frame_ids_dev.numel()} is not divisible by spatial token count {spatial_tokens_per_frame}."
             )
 
-        temporal_positions = frame_ids_dev
         h_positions = torch.arange(post_patch_height, dtype=torch.float32, device=device)
         w_positions = torch.arange(post_patch_width, dtype=torch.float32, device=device)
         h_grid, w_grid = torch.meshgrid(h_positions, w_positions, indexing="ij")
@@ -793,7 +749,7 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
 
         cos_list = []
         sin_list = []
-        for dim, positions in zip(rope_dim_list, (temporal_positions, h_positions, w_positions)):
+        for dim, positions in zip(rope_dim_list, (frame_ids_dev, h_positions, w_positions)):
             cos, sin = get_1d_rotary_pos_embed(
                 dim,
                 positions,
@@ -807,7 +763,7 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         txt_freqs = None
         if txt_rope_size is not None:
             max_vis_id = torch.stack(
-                [temporal_positions.max(), h_positions.max(), w_positions.max()]
+                [frame_ids_dev.max(), h_positions.max(), w_positions.max()]
             ).max()
             txt_positions = torch.arange(txt_rope_size, dtype=torch.float32, device=device) + max_vis_id + 1
             txt_cos_list = []
@@ -1010,7 +966,6 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         skip_text_stream: bool = False,
         relax_history_window: bool = False,
         active_chunk_only_conditioning: bool = False,
-        attention_kwargs: Optional[Dict[str, Any]] = None,
         return_dict: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor] | Transformer3DModelOutput:
         """Run forcing or DMD rollouts with kv_cache_mode=None; otherwise store or reuse clean-history KV."""
@@ -1019,11 +974,11 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         if encoder_hidden_states is None:
             raise ValueError("`encoder_hidden_states` must be provided for MMDiT.")
 
-        self._ensure_kv_cache_state()
         if kv_cache_mode is not None:
+            if kv_cache_mode not in {"reuse", "store", "reuse_store"}:
+                raise ValueError(f"Unsupported KV cache mode: {kv_cache_mode!r}.")
             self.configure_inference_kv_cache(
                 scope=kv_cache_scope,
-                mode=kv_cache_mode,
                 chunk_id=kv_cache_chunk_id,
                 selected_chunk_ids=kv_cache_selected_chunk_ids,
                 pre_rope=kv_cache_pre_rope,
@@ -1321,14 +1276,14 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         else:
             timestep_for_embed = timestep
 
-        _, vec, txt = self.condition_embedder(timestep_for_embed, encoder_hidden_states)
+        vec, txt = self.condition_embedder(timestep_for_embed, encoder_hidden_states)
         if vec.shape[-1] > self.hidden_size:
             vec = vec.unflatten(-1, (6, -1))
 
         # Bind each text replica to one target chunk.
         per_replica_text_len = txt.shape[1]
         chunk_size_cfg = self.config.chunk_size
-        noisy_only_frame_ids = noisy_temporal_ids_tensor if noisy_temporal_ids_tensor is not None else None
+        noisy_only_frame_ids = noisy_temporal_ids_tensor
         if noisy_only_frame_ids is None:
             base_ids = torch.arange(noisy_patch_shape[0], device=device, dtype=torch.long)
             noisy_only_frame_ids = base_ids.unsqueeze(0).expand(batch_size, -1)
@@ -1352,7 +1307,6 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         # Use each chunk's timestep for its text replica.
         text_vec_indices = None
         if timestep.ndim == 2:
-            chunk_size_cfg = self.config.chunk_size
             spatial_tokens_per_frame = noisy_patch_shape[1] * noisy_patch_shape[2]
             text_vec_idx_list = []
             for b in range(batch_size):
@@ -1392,7 +1346,7 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
 
         attention_mask = None
         block_mask = None
-        use_kv_cache = bool(self._use_inference_kv_cache and kv_cache_mode in {"reuse", "store", "reuse_store"})
+        use_kv_cache = kv_cache_mode is not None
         if not use_kv_cache:
             mask_kwargs = dict(
                 frame_ids=full_frame_ids,

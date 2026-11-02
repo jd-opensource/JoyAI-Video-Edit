@@ -15,7 +15,7 @@ def load_modulation(
     elif modulate_type == 'adaLN':
         return ModulateDiT(hidden_size, factor, act_layer, **factory_kwargs)
     elif modulate_type == 'jdx':
-        return ModulateX(hidden_size, factor, **factory_kwargs)
+        return ModulateX(factor)
     else:
         raise ValueError(
             f"Unknown modulation type: {modulate_type}.")
@@ -49,13 +49,7 @@ class ModulateDiT(nn.Module):
 class ModulateWan(nn.Module):
     """Modulation layer for WanX."""
 
-    def __init__(
-        self,
-        hidden_size: int,
-        factor: int,
-        dtype=None,
-        device=None,
-    ):
+    def __init__(self, hidden_size: int, factor: int, dtype=None, device=None):
         super().__init__()
         self.factor = factor
         self.modulate_table = nn.Parameter(
@@ -73,16 +67,9 @@ class ModulateWan(nn.Module):
 class ModulateX(nn.Module):
     """Modulation layer for WanX."""
 
-    def __init__(
-        self,
-        hidden_size: int,
-        factor: int,
-        dtype=None,
-        device=None,
-    ):
+    def __init__(self, factor: int):
         super().__init__()
         self.factor = factor
-        _ = hidden_size, dtype, device
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if len(x.shape) != 3:
@@ -102,11 +89,8 @@ def modulate(x, shift=None, scale=None):
         return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 
-def apply_gate(x, gate=None, tanh=False):
+def apply_gate(x, gate=None):
     """Apply an element-wise gate to the residual branch output."""
     if gate is None:
         return x
-    if tanh:
-        return x * gate.unsqueeze(1).tanh()
-    else:
-        return x * gate.unsqueeze(1)
+    return x * gate.unsqueeze(1)

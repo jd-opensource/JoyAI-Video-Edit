@@ -229,7 +229,6 @@ def run_inference(args, items: list[BenchmarkItem]) -> None:
         data_size = dist.get_world_size()
         seed_everything(args.seed)
         model = load_dit(cfg, device=device, use_fsdp=False)
-        model.config.use_inference_kv_cache = True
         model.requires_grad_(False)
         model.eval()
         pipeline = load_pipeline(cfg, model, device)
