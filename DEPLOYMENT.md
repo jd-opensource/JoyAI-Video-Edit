@@ -98,9 +98,9 @@ Then install the attention and kernel dependencies:
   The patch routes every kernel launch through `at::cuda::getCurrentCUDAStream()`
   instead of the default stream — without it, upstream SageAttention records
   empty CUDA graphs (kernels escape capture) and the server's graph path
-  produces noise. `JOYOMNI_SAGE_ATTN` is the only switch: default `0` → SDPA
-  (cuDNN). Launch with `JOYOMNI_SAGE_ATTN=1` on an RTX 5090 (see §4); leave it
-  unset on RTX PRO 6000 / B200.
+  produces noise. On RTX 5090, set `JOYOMNI_FA4_ATTN=0 JOYOMNI_SAGE_ATTN=1`
+  to select SageAttention (see §4). Keep SageAttention disabled on RTX PRO 6000
+  and B200.
 - **flash-attn-4** (`4.0.0b13`, *required on FA4 machines — B200; skip on
   RTX PRO 6000 / 5090, its JIT does not support sm_120*) — provides
   `flash_attn.cute`; kernels JIT at runtime, no build step. Deps must be
@@ -112,7 +112,7 @@ Then install the attention and kernel dependencies:
   ```
 
   If it can't be imported or its kernel fails at runtime, the DiT
-  automatically falls back to cuDNN.
+  falls back to SageAttention when enabled, otherwise PyTorch SDPA (cuDNN/flash).
 - **joyomni_ops** — in-tree CUDA op library ([`deploy/joyomni_ops/`](deploy/joyomni_ops/))
   providing the FP8 GEMM + fused norm/rope kernels the DiT uses (extracted from
   sgl-kernel, Apache-2.0, no `sgl_kernel`/`sglang` runtime dependency).
@@ -182,16 +182,16 @@ mkdir -p deploy/deps/checkpoints
 hf download jdopensource/JoyAI-Video-Edit \
   --repo-type model \
   --local-dir deploy/deps/checkpoints/JoyAI-Video-Edit \
-  --include "dit/joyai_video_edit_dit_0811.pth" "vae/*"
+  --include "dit/joyai_video_edit_dit_1101_face++.pth" "vae/*"
 ```
 
-> The repo also ships the older `dit/joyai_video_edit_dit_0804.pth` (~32.5 GB);
-> `--include` skips it — the server uses **0811**.
+> The default DiT checkpoint is `joyai_video_edit_dit_1101_face++.pth`.
+> Set `JOYOMNI_DIT_CKPT` to use another checkpoint.
 
 This should produce:
 
 ```
-deploy/deps/checkpoints/JoyAI-Video-Edit/dit/joyai_video_edit_dit_0811.pth
+deploy/deps/checkpoints/JoyAI-Video-Edit/dit/joyai_video_edit_dit_1101_face++.pth
 deploy/deps/checkpoints/JoyAI-Video-Edit/vae/config.json
 deploy/deps/checkpoints/JoyAI-Video-Edit/vae/diffusion_pytorch_model.safetensors
 ```
@@ -255,7 +255,7 @@ Final tree:
 ```
 deploy/deps/checkpoints/
 ├── JoyAI-Video-Edit/
-│   ├── dit/joyai_video_edit_dit_0811.pth
+│   ├── dit/joyai_video_edit_dit_1101_face++.pth
 │   └── vae/{config.json, diffusion_pytorch_model.safetensors}
 ├── MiMo-VL-7B-RL-2508/
 ├── face_detection_yunet_2023mar.onnx
@@ -277,6 +277,7 @@ gets its own `JOYOMNI_CACHE_ROOT`. UI: `http://<server-ip>:8080/`.
 JOYOMNI_CONDA_SH=/path/to/conda/etc/profile.d/conda.sh \
 JOYOMNI_CONDA_ENV=joyai-video-edit \
 JOYOMNI_CACHE_ROOT=$PWD/deploy/deps/cache_b200 \
+JOYOMNI_FA4_ATTN=1 JOYOMNI_SAGE_ATTN=0 \
 JOYOMNI_WIDTH=1248 JOYOMNI_HEIGHT=720 JOYOMNI_FPS=30 \
 bash deploy/run_server.sh
 ```
@@ -287,6 +288,7 @@ bash deploy/run_server.sh
 JOYOMNI_CONDA_SH=/path/to/conda/etc/profile.d/conda.sh \
 JOYOMNI_CONDA_ENV=joyai-video-edit \
 JOYOMNI_CACHE_ROOT=$PWD/deploy/deps/cache_pro6000 \
+JOYOMNI_FA4_ATTN=0 JOYOMNI_SAGE_ATTN=0 \
 bash deploy/run_server.sh
 ```
 
@@ -296,6 +298,7 @@ bash deploy/run_server.sh
 JOYOMNI_CONDA_SH=/path/to/conda/etc/profile.d/conda.sh \
 JOYOMNI_CONDA_ENV=joyai-video-edit \
 JOYOMNI_CACHE_ROOT=$PWD/deploy/deps/cache_pro6000 \
+JOYOMNI_FA4_ATTN=0 JOYOMNI_SAGE_ATTN=0 \
 JOYOMNI_WIDTH=1248 JOYOMNI_HEIGHT=720 JOYOMNI_FPS=16 \
 bash deploy/run_server.sh
 ```
@@ -306,7 +309,7 @@ bash deploy/run_server.sh
 JOYOMNI_CONDA_SH=/path/to/conda/etc/profile.d/conda.sh \
 JOYOMNI_CONDA_ENV=joyai-video-edit \
 JOYOMNI_CACHE_ROOT=$PWD/deploy/deps/cache_rtx5090 \
-JOYOMNI_SAGE_ATTN=1 JOYOMNI_FP8_FAST_ACCUM=1 JOYOMNI_LOW_VRAM=1 \
+JOYOMNI_FA4_ATTN=0 JOYOMNI_SAGE_ATTN=1 JOYOMNI_FP8_FAST_ACCUM=1 JOYOMNI_LOW_VRAM=1 \
 bash deploy/run_server.sh
 ```
 
@@ -320,7 +323,8 @@ Key variables:
 | `JOYOMNI_WIDTH` / `JOYOMNI_HEIGHT` / `JOYOMNI_FPS` | Output resolution and frame rate (default `840` / `480` / `24` = 480p @ 24 FPS). Per-GPU commands above. |
 | `JOYOMNI_FP8_IMG` / `JOYOMNI_FP8_TXT` | FP8 image / text paths via `joyomni_ops` (default `1` / `1`). Set both `0` to run bf16 (e.g. a `JOYOMNI_OPS_NO_FP8=1` build). |
 | `JOYOMNI_CUDA_GRAPH` | capture the steady-state chunk loop into a CUDA graph (default `1`; the biggest single speedup). `0` runs eager. |
-| `JOYOMNI_SAGE_ATTN` | SageAttention for all DiT attention (default `0` → SDPA/cuDNN; set `1` on RTX 5090). |
+| `JOYOMNI_FA4_ATTN` | Try FA4 first when installed (default `1`). Set `1` on B200; set `0` on RTX PRO 6000 / RTX 5090. HF ZeroGPU defaults to `0`. |
+| `JOYOMNI_SAGE_ATTN` | Use SageAttention when FA4 is disabled or unavailable (default `0`). Set `1` with `JOYOMNI_FA4_ATTN=0` on RTX 5090; otherwise use PyTorch SDPA. |
 | `JOYOMNI_FP8_FAST_ACCUM` | FP8 GEMMs accumulate in fp16 via a Triton kernel (default `0`; set `1` on RTX 5090, where fp32-accumulate tensor MMAs run at half rate — they run at full rate on RTX PRO 6000 / B200, so leave it unset there). |
 | `JOYOMNI_LOW_VRAM` | low-VRAM layout — CPU-staged FP8 DiT load + text-encoder CPU offload (default `0`; set `1` on ≤48 GB cards — the full layout needs ~46.5 GB steady at 720p16). 480p24 measured ~21.5 GiB resident / ~28 GiB peak under a 30 GiB allocator cap — fits 32 GB cards. |
 | `JOYOMNI_CACHE_ROOT` | compile-cache root — torchinductor / triton / nv_compute caches live under it (default `deploy/deps/cache`). Give each GPU model its own root when several share a checkout (per-card commands above). |
