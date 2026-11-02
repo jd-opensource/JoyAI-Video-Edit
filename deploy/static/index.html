@@ -1152,11 +1152,7 @@ function resetRunMetrics() {
   lastShownCaptureMs = 0;
   clearOutputQueue();
   hideOutputToast();
-  if (lastObjectUrl) URL.revokeObjectURL(lastObjectUrl);
-  lastObjectUrl = null;
-  if (pendingRevokeUrl) { URL.revokeObjectURL(pendingRevokeUrl); pendingRevokeUrl = null; }
-  outputImg.onload = outputImg.onerror = null;
-  outputImg.removeAttribute("src");
+  blankOutputPane();
   hidePeResult();
   sessionProfileTimings = false;
   stageTimings.innerHTML = "";

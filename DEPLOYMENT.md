@@ -33,7 +33,7 @@ deploy/
 ├── rv2v_reference/        # reference images for the UI
 ├── recordings/            # session recordings (created at runtime; git-ignored)
 └── deps/                  # weights + compile cache — NOT in git
-    ├── checkpoints/       # DiT / xVAE / MiMo-VL / onnx detectors (~51G)
+    ├── checkpoints/       # DiT / xVAE / MiMo-VL / Qwen PE / ONNX detectors
     └── cache*/            # torchinductor / triton / nv_compute (one root per GPU model, §4)
 ```
 
@@ -169,8 +169,9 @@ PY
 
 ## 3. Fetch the weights
 
-All weights live under `deploy/deps/checkpoints/` (~51 GB total). Create it and
-download each dependency.
+Video-model and local PE weights live under `deploy/deps/checkpoints/`.
+The Qwen PE checkpoint requires about 22.8 GiB in addition to the video weights.
+Create the directory and download each dependency.
 
 ```bash
 mkdir -p deploy/deps/checkpoints
@@ -204,7 +205,19 @@ hf download XiaomiMiMo/MiMo-VL-7B-RL-2508 \
   --local-dir deploy/deps/checkpoints/MiMo-VL-7B-RL-2508
 ```
 
-**3c. ONNX detectors** (*optional*):
+**3c. Local prompt enhancement** — Qwen3.5-35B-A3B GPTQ INT4:
+
+```bash
+hf download Qwen/Qwen3.5-35B-A3B-GPTQ-Int4 \
+  --revision 3af5ca2972faf6de1fd6f4efc4d8d319ca751e8b \
+  --local-dir deploy/deps/checkpoints/Qwen3.5-35B-A3B-GPTQ-Int4
+```
+
+`deploy/run_server.sh` defaults to `JOYOMNI_PE_BACKEND=qwen` and loads this
+local directory. Override it with `JOYOMNI_PE_CKPT` when storing the checkpoint
+elsewhere.
+
+**3d. ONNX detectors** (*optional*):
 
 ```bash
 # YuNet face detector (OpenCV Zoo, git-LFS — use the media.githubusercontent URL)
@@ -248,7 +261,7 @@ conda env remove -n yolo-export -y          # optional: drop the throwaway env
 
 > The detectors are **optional**: if a file is missing the server just disables
 > that gate (edits run unconditionally). The DiT, VAE, and MiMo-VL weights are the
-> only hard requirements.
+> requirements for video inference. Local Qwen PE additionally requires the Qwen checkpoint.
 
 Final tree:
 
@@ -258,6 +271,7 @@ deploy/deps/checkpoints/
 │   ├── dit/joyai_video_edit_dit_1101_face++.pth
 │   └── vae/{config.json, diffusion_pytorch_model.safetensors}
 ├── MiMo-VL-7B-RL-2508/
+├── Qwen3.5-35B-A3B-GPTQ-Int4/
 ├── face_detection_yunet_2023mar.onnx
 └── yolov8n.onnx
 ```
@@ -326,9 +340,11 @@ Key variables:
 | `JOYOMNI_FA4_ATTN` | Try FA4 first when installed (default `1`). Set `1` on B200; set `0` on RTX PRO 6000 / RTX 5090. HF ZeroGPU defaults to `0`. |
 | `JOYOMNI_SAGE_ATTN` | Use SageAttention when FA4 is disabled or unavailable (default `0`). Set `1` with `JOYOMNI_FA4_ATTN=0` on RTX 5090; otherwise use PyTorch SDPA. |
 | `JOYOMNI_FP8_FAST_ACCUM` | FP8 GEMMs accumulate in fp16 via a Triton kernel (default `0`; set `1` on RTX 5090, where fp32-accumulate tensor MMAs run at half rate — they run at full rate on RTX PRO 6000 / B200, so leave it unset there). |
-| `JOYOMNI_LOW_VRAM` | low-VRAM layout — CPU-staged FP8 DiT load + text-encoder CPU offload (default `0`; set `1` on ≤48 GB cards — the full layout needs ~46.5 GB steady at 720p16). 480p24 measured ~21.5 GiB resident / ~28 GiB peak under a 30 GiB allocator cap — fits 32 GB cards. |
+| `JOYOMNI_LOW_VRAM` | low-VRAM layout — CPU-staged FP8 DiT load + text-encoder CPU offload (default `0`; set `1` on ≤48 GB cards — the full layout needs ~46.5 GB steady at 720p16). Video-only 480p24 measured ~21.5 GiB resident / ~28 GiB peak under a 30 GiB allocator cap. Local Qwen PE needs additional GPU memory. |
 | `JOYOMNI_CACHE_ROOT` | compile-cache root — torchinductor / triton / nv_compute caches live under it (default `deploy/deps/cache`). Give each GPU model its own root when several share a checkout (per-card commands above). |
 | `JOYOMNI_CKPT_ROOT` | override the checkpoints dir (default `deploy/deps/checkpoints`). |
 | `JOYOMNI_DIT_CKPT` / `JOYOMNI_VAE_CKPT` / `JOYOMNI_TEXT_ENCODER_CKPT` / `JOYOMNI_FACE_ONNX` / `JOYOMNI_PERSON_ONNX` | override individual weight paths (default: derived from `JOYOMNI_CKPT_ROOT`). |
 | `JOYOMNI_RECORD_DIR` | recording output dir. |
-| `PE_MODEL` / `OPENAI_BASE_URL` / `OPENAI_API_KEY` | Prompt-enhancement endpoint: OpenAI-compatible, or Anthropic-protocol when the base URL contains `/anthropic` (key sent as `Authorization: Bearer`). If unset, the server falls back to the raw user prompt. |
+| `JOYOMNI_PE_BACKEND` | `qwen` (default): local Qwen INT4 PE. `api`: external prompt-enhancement endpoint. |
+| `JOYOMNI_PE_CKPT` | Local Qwen directory (default `JOYOMNI_CKPT_ROOT/Qwen3.5-35B-A3B-GPTQ-Int4`). |
+| `PE_MODEL` / `OPENAI_BASE_URL` / `OPENAI_API_KEY` | Used with `JOYOMNI_PE_BACKEND=api`. Prompt-enhancement endpoint: OpenAI-compatible, or Anthropic-protocol when the base URL contains `/anthropic` (key sent as `Authorization: Bearer`). If unset, the server falls back to the raw user prompt. |

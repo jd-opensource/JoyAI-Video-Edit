@@ -193,7 +193,7 @@ def _chunk_causal_visibility(
     global_sink_chunk: bool,
     relax_history_window: bool,
 ) -> torch.Tensor:
-    """Build causal masks with chunk-local clean self-attention."""
+    """Build chunk-causal attention masks."""
     same_chunk = query_chunk_ids == key_chunk_ids
     chunk_distance = query_chunk_ids - key_chunk_ids
     past_window = (chunk_distance >= 1) & (chunk_distance <= history_size)
@@ -212,7 +212,7 @@ def _chunk_causal_visibility(
     forcing_visible = (
         query_is_conditioned
         & ((key_is_conditioned & same_chunk) | (key_is_clean & past_window) | key_is_reference)
-    ) | (query_is_clean & key_is_clean & same_chunk) | reference_self_attention
+    ) | (query_is_clean & key_is_clean & (same_chunk | past_window)) | reference_self_attention
 
     query_is_active = query_chunk_ids == active_chunk_ids
     noisy_history_visible = query_is_noisy & key_is_noisy & (

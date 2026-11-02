@@ -460,7 +460,7 @@ async def _enhance_prompt(
     pipeline=None,
     inference_lock=None,
 ) -> dict[str, Any]:
-    started = time.time()
+    started = time.perf_counter()
     task_type = "rv2v" if ref_image is not None else "v2v"
     enhanced_prompt = raw_prompt
     error = None
@@ -489,7 +489,7 @@ async def _enhance_prompt(
         "model": model,
         "raw_prompt": raw_prompt,
         "enhanced_prompt": enhanced_prompt,
-        "elapsed_s": time.time() - started,
+        "elapsed_s": time.perf_counter() - started,
         "fallback": enhanced_prompt == raw_prompt,
         "cached": False,
     }
@@ -499,6 +499,8 @@ async def _enhance_prompt(
         report["template"] = enhancer.template
         report["decoder"] = getattr(enhancer, "decoder", "eager")
         report["timings"] = enhancer.timings
+    log_fields = ("backend", "task_type", "model", "elapsed_s", "fallback", "decoder", "timings", "error")
+    print("[pe] " + json.dumps({k: report[k] for k in log_fields if k in report}), flush=True)
     return report
 
 class _SegmentedRecorder:
