@@ -8,6 +8,16 @@ from torch.distributed.fsdp import FSDPModule
 from src.distributed.communications import all_ranks_finite
 
 
+def build_token_timesteps(timesteps: torch.Tensor, latents: torch.Tensor, model) -> torch.Tensor:
+    """Repeat each patch-frame timestep across its spatial tokens."""
+    patch_time, patch_height, patch_width = model.config.patch_size
+    frames, height, width = latents.shape[-3:]
+    spatial_tokens = (height // patch_height) * (width // patch_width)
+    return timesteps[:, ::patch_time].unsqueeze(-1).expand(-1, -1, spatial_tokens).reshape(
+        timesteps.shape[0], (frames // patch_time) * spatial_tokens,
+    )
+
+
 def synchronize_batch_frames(batch: dict, device: torch.device) -> dict:
     """Keep chunk-by-chunk forward counts equal when ranks draw different buckets."""
     if not dist.is_initialized() or dist.get_world_size() == 1:

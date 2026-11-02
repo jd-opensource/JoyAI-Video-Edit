@@ -1,5 +1,6 @@
 import os
 import io
+import glob
 import html
 import math
 import json
@@ -21,13 +22,12 @@ from torch.utils.data import IterableDataset
 from diffusers.utils import is_ftfy_available
 
 from src.dataset.bucket_util import BucketGroup, reference_size, resize_pixels
-from src.utils import get_evenly_divisible_files, get_from_dict
+from src.utils import get_from_dict
 from src.utils.logging import get_logger
 
 if is_ftfy_available():
     import ftfy
 
-decord.bridge.set_bridge("torch")
 datasets.disable_caching()
 
 
@@ -127,36 +127,25 @@ class ImageVideoWebDataset(IterableDataset):
         buffer_size: int = 1000,
         rec_aug_rate: float = 0.0,
     ):
-        if image_data_files is None and not math.isclose(image_sampling_prob, 0.0, abs_tol=1e-8):
-            raise ValueError(
-                "image_sampling_prob must be 0 when image_data_files is None"
-            )
-        if image_data_files is not None:
-            assert image_caption_keys is not None and image_caption_sampling_prob is not None
-            assert len(image_caption_keys) == len(image_caption_sampling_prob)
-        if multiple_images_data_files is None and not math.isclose(multiple_images_sampling_prob, 0.0, abs_tol=1e-8):
-            raise ValueError(
-                "multiple_images_sampling_prob must be 0 when multiple_images_data_files is None"
-            )
-        if multiple_images_data_files is not None:
-            assert multiple_images_caption_keys is not None and multiple_images_caption_sampling_prob is not None
-            assert len(multiple_images_caption_keys) == len(multiple_images_caption_sampling_prob)
-        if multiple_videos_data_files is None and not math.isclose(multiple_videos_sampling_prob, 0.0, abs_tol=1e-8):
-            raise ValueError(
-                "multiple_videos_sampling_prob must be 0 when multiple_videos_data_files is None"
-            )
-        if multiple_videos_data_files is not None:
-            assert multiple_videos_caption_keys is not None and multiple_videos_caption_sampling_prob is not None
-            assert len(multiple_videos_caption_keys) == len(multiple_videos_caption_sampling_prob)
-        if video_data_files is None and not math.isclose(video_sampling_prob, 0.0, abs_tol=1e-8):
-            raise ValueError(
-                "video_sampling_prob must be 0 when video_data_files is None"
-            )
-        if video_data_files is not None:
-            assert video_caption_keys is not None and video_caption_sampling_prob is not None
-            assert len(video_caption_keys) == len(video_caption_sampling_prob)
-        logger = get_logger()
-
+        task_configs = (
+            ("image", image_data_files, image_sampling_prob, image_caption_keys, image_caption_sampling_prob),
+            ("multiple_images", multiple_images_data_files, multiple_images_sampling_prob, multiple_images_caption_keys, multiple_images_caption_sampling_prob),
+            ("multiple_videos", multiple_videos_data_files, multiple_videos_sampling_prob, multiple_videos_caption_keys, multiple_videos_caption_sampling_prob),
+            ("video", video_data_files, video_sampling_prob, video_caption_keys, video_caption_sampling_prob),
+        )
+        for mode, files, weight, caption_keys, caption_weights in task_configs:
+            if not math.isfinite(weight) or weight < 0:
+                raise ValueError(f"{mode} sampling weight must be finite and non-negative.")
+            if weight == 0:
+                continue
+            if not files:
+                raise ValueError(f"{mode} data files are required when its sampling weight is positive.")
+            if not caption_keys or not caption_weights or len(caption_keys) != len(caption_weights):
+                raise ValueError(f"{mode} caption keys and weights must be non-empty and have matching lengths.")
+            if any(not math.isfinite(value) or value < 0 for value in caption_weights) or sum(caption_weights) <= 0:
+                raise ValueError(f"{mode} caption weights must be finite, non-negative, and have a positive sum.")
+        if sum(config[2] for config in task_configs) <= 0:
+            raise ValueError("At least one task sampling weight must be positive.")
         self.image_caption_keys = image_caption_keys
         self.image_caption_sampling_prob = image_caption_sampling_prob
         self.multiple_images_caption_keys = multiple_images_caption_keys
@@ -187,12 +176,12 @@ class ImageVideoWebDataset(IterableDataset):
                                 for b in self.bucket_group.bucket_configs}
 
         self._image_dataset, self._image_iterator = None, None
-        if image_data_files is not None:
+        if image_sampling_prob > 0:
             self._image_dataset, self._image_iterator = self._init_dataset(
-                image_data_files, logger)
+                image_data_files)
 
         self._multiple_images_dataset, self._multiple_images_iterator = None, None
-        if multiple_images_data_files is not None:
+        if multiple_images_sampling_prob > 0:
             # Declare both image extensions so shard schemas retain their images.
             multiple_images_features = datasets.Features({
                 "json": datasets.Value("string"),
@@ -206,10 +195,10 @@ class ImageVideoWebDataset(IterableDataset):
                 "2.png": datasets.Image(),
             })
             self._multiple_images_dataset, self._multiple_images_iterator = self._init_dataset(
-                multiple_images_data_files, logger, features=multiple_images_features)
+                multiple_images_data_files, features=multiple_images_features)
 
         self._multiple_videos_dataset, self._multiple_videos_iterator = None, None
-        if multiple_videos_data_files is not None:
+        if multiple_videos_sampling_prob > 0:
             multiple_videos_features = datasets.Features({
                 "json": datasets.Value("string"),
                 "__key__": datasets.Value("string"),
@@ -217,16 +206,17 @@ class ImageVideoWebDataset(IterableDataset):
                 "0.mp4": datasets.Video(decode=False),
                 "1.mp4": datasets.Video(decode=False),
                 "0.jpg": datasets.Image(),
+                "0.png": datasets.Image(),
             })
             self._multiple_videos_dataset, self._multiple_videos_iterator = self._init_dataset(
-                multiple_videos_data_files, logger, features=multiple_videos_features)
+                multiple_videos_data_files, features=multiple_videos_features)
 
         self._video_dataset, self._video_iterator = None, None
-        if video_data_files is not None:
+        if video_sampling_prob > 0:
             self._video_dataset, self._video_iterator = self._init_dataset(
-                video_data_files, logger)
+                video_data_files)
 
-    def _init_dataset(self, data_files: str | list[str], logger, features=None):
+    def _init_dataset(self, data_files: str | list[str], features=None):
         world_size, rank = self._get_distributed_info()
         data_files = [data_files] if isinstance(data_files, str) else list(data_files)
 
@@ -251,9 +241,17 @@ class ImageVideoWebDataset(IterableDataset):
                 tar_rng = random.Random(self.tar_files_shuffle_seed)
                 tar_rng.shuffle(data_files)
 
+        else:
+            data_files = [
+                path for pattern in data_files
+                for path in sorted(glob.glob(pattern, recursive="**" in pattern))
+            ]
+        if not data_files:
+            raise FileNotFoundError("No training shards found.")
         if self.ensure_divisible_shards:
-            data_files = get_evenly_divisible_files(
-                data_files, world_size, logger=logger, is_skip_glob=all_json)
+            data_files = data_files[:len(data_files) // world_size * world_size]
+            if not data_files:
+                raise ValueError(f"At least {world_size} shards are required for equal distribution.")
 
         dataset = datasets.load_dataset(
             "webdataset", data_files=data_files, streaming=True, split="train",
@@ -272,6 +270,7 @@ class ImageVideoWebDataset(IterableDataset):
         return int(os.getenv("WORLD_SIZE", "1")), int(os.getenv("RANK", "0"))
 
     def _open_video_reader(self, video: Any):
+        decord.bridge.set_bridge("torch")
         if isinstance(video, dict):
             path = video.get("path")
             video_bytes = video.get("bytes")
@@ -285,40 +284,7 @@ class ImageVideoWebDataset(IterableDataset):
         if isinstance(video, (bytes, bytearray)):
             return decord.VideoReader(io.BytesIO(video))
 
-        if hasattr(video, "get_frames_at") and hasattr(video, "metadata"):
-            return video
-
         raise TypeError(f"Unsupported video type: {type(video)}")
-
-    def _get_video_hw(self, video_reader: Any) -> tuple[int, int]:
-        metadata = getattr(video_reader, "metadata", None)
-        height = getattr(metadata, "height", None)
-        width = getattr(metadata, "width", None)
-        if height is not None and width is not None:
-            return int(height), int(width)
-
-        first_frame = video_reader[0]
-        if first_frame.ndim != 3:
-            raise ValueError(
-                f"Unexpected frame shape: {tuple(first_frame.shape)}"
-            )
-        if first_frame.shape[0] in (1, 3):
-            return int(first_frame.shape[1]), int(first_frame.shape[2])
-        return int(first_frame.shape[0]), int(first_frame.shape[1])
-
-    def _get_video_batch(self, video_reader: Any, frame_idx: list[int]) -> torch.Tensor:
-        if hasattr(video_reader, "get_batch"):
-            pixel = video_reader.get_batch(frame_idx)
-        else:
-            pixel = video_reader.get_frames_at(frame_idx).data
-
-        if pixel.ndim != 4:
-            raise ValueError(f"Unexpected video batch shape: {tuple(pixel.shape)}")
-        if pixel.shape[1] in (1, 3):
-            return pixel
-        if pixel.shape[-1] in (1, 3):
-            return rearrange(pixel, "t h w c -> t c h w")
-        raise ValueError(f"Unexpected channel layout in video batch: {tuple(pixel.shape)}")
 
     def _process_video(self, video: Any):
         video_reader = self._open_video_reader(video)
@@ -326,7 +292,7 @@ class ImageVideoWebDataset(IterableDataset):
         if n_frame <= 0:
             raise ValueError("Empty video encountered.")
 
-        height, width = self._get_video_hw(video_reader)
+        height, width = video_reader[0].shape[:2]
         fps_ratio = self._get_video_fps_ratio(video_reader)
         bucket = self.bucket_group.find_best_bucket((1, int(n_frame // fps_ratio), height, width))
         pixel = self._sample_video_with_bucket(video_reader, bucket)
@@ -334,13 +300,7 @@ class ImageVideoWebDataset(IterableDataset):
         return pixel, bucket
 
     def _get_video_fps_ratio(self, video_reader: Any) -> float:
-        if hasattr(video_reader, "get_avg_fps"):
-            cur_fps = video_reader.get_avg_fps()
-        else:
-            metadata = getattr(video_reader, "metadata", None)
-            cur_fps = getattr(metadata, "average_fps", None)
-        if cur_fps is None:
-            return 1.0
+        cur_fps = video_reader.get_avg_fps()
         if self.fps > 0 and cur_fps > self.fps:
             return cur_fps / self.fps
         return 1.0
@@ -376,7 +336,7 @@ class ImageVideoWebDataset(IterableDataset):
         sample_idx = np.clip(sample_idx, 0, clip_len - 1)
         frame_idx = (start_idx + sample_idx).tolist()
 
-        pixel = self._get_video_batch(video_reader, frame_idx)
+        pixel = video_reader.get_batch(frame_idx).permute(0, 3, 1, 2)
         pixel = resize_crop_normalize(pixel, (target_height, target_width))
         return rearrange(pixel, "t c h w -> c t h w")
 
@@ -389,7 +349,7 @@ class ImageVideoWebDataset(IterableDataset):
         if len(target_reader) <= 0:
             raise ValueError("Target video is empty.")
 
-        target_height, target_width = self._get_video_hw(target_reader)
+        target_height, target_width = target_reader[0].shape[:2]
         target_fps_ratio = self._get_video_fps_ratio(target_reader)
         bucket = self.bucket_group.find_best_bucket(
             (len(videos), int(len(target_reader) // target_fps_ratio), target_height, target_width)
@@ -471,32 +431,18 @@ class ImageVideoWebDataset(IterableDataset):
         pixel = pixel.unsqueeze(0)
         return pixel, bucket
 
-    def _get_caption(self, item, json_data):
+    def _get_caption(self, json_data, mode: str):
         logger = get_logger()
 
         available_captions = []
         weights = []
 
-        is_multiple_images = self._detect_multi_image_ext(item) is not None
-        is_multiple_videos = bool("0.mp4" in item)
-        is_image = bool("jpg" in item) and not is_multiple_images
-        is_video = bool("mp4" in item) and not is_multiple_videos
-        if is_multiple_videos:
-            caption_keys = self.multiple_videos_caption_keys
-            caption_sampling_prob = self.multiple_videos_caption_sampling_prob
-        elif is_multiple_images:
-            caption_keys = self.multiple_images_caption_keys
-            caption_sampling_prob = self.multiple_images_caption_sampling_prob
-        elif is_image:
-            caption_keys = self.image_caption_keys
-            caption_sampling_prob = self.image_caption_sampling_prob
-        elif is_video:
-            caption_keys = self.video_caption_keys
-            caption_sampling_prob = self.video_caption_sampling_prob
-        else:
-            raise ValueError(f"Invalid item: {item.keys()}")
+        caption_keys = getattr(self, f"{mode}_caption_keys")
+        caption_sampling_prob = getattr(self, f"{mode}_caption_sampling_prob")
 
         for key, prob in zip(caption_keys, caption_sampling_prob):
+            if prob == 0:
+                continue
             try:
                 value = get_from_dict(json_data, key)
             except (KeyError, TypeError):
@@ -539,25 +485,34 @@ class ImageVideoWebDataset(IterableDataset):
             raise ValueError("Invalid JSON format in item['json']") from error
 
         image_ext = self._detect_multi_image_ext(item)
-        is_multiple_images = image_ext is not None
-        is_multiple_videos = bool("0.mp4" in item)
-        is_image = bool("jpg" in item) and not is_multiple_images
-        is_video = bool("mp4" in item) and not is_multiple_videos
+        single_image = next((item[ext] for ext in ("jpg", "png") if item.get(ext) is not None), None)
+        if item.get("0.mp4") is not None:
+            mode = "multiple_videos"
+        elif image_ext is not None:
+            mode = "multiple_images"
+        elif single_image is not None:
+            mode = "image"
+        elif item.get("mp4") is not None:
+            mode = "video"
+        else:
+            raise ValueError(f"Invalid item: {item.keys()}")
 
-        caption = self._get_caption(item, json_data)
+        caption = self._get_caption(json_data, mode)
         ref_image_pixel = None
-        if is_multiple_videos:
+        if mode == "multiple_videos":
             pixel, bucket_id = self._process_multiple_videos(
                 self._collect_sequential_media(item, "mp4")
             )
             ref_image = item.get("0.jpg")
+            if ref_image is None:
+                ref_image = item.get("0.png")
             caption_only = isinstance(json_data, dict) and set(json_data) == {"caption"}
             metadata = json_data.get("metadata") if isinstance(json_data, dict) else None
             if not caption_only and not (isinstance(metadata, dict) and metadata.get("ref_image", None) is not None):
                 ref_image = None
             if ref_image is not None:
                 ref_image_pixel = self._process_ref_image(ref_image)
-        elif is_multiple_images:
+        elif mode == "multiple_images":
             images = self._collect_sequential_media(item, image_ext)
             # Three-item samples contain reference, source, and target images.
             if len(images) == 3:
@@ -582,12 +537,10 @@ class ImageVideoWebDataset(IterableDataset):
                 else:
                     use_rec_aug = False
                 pixel, bucket_id = self._process_multiple_images(images, use_rec_aug)
-        elif is_image:
-            pixel, bucket_id = self._process_image(item["jpg"])
-        elif is_video:
-            pixel, bucket_id = self._process_video(item["mp4"])
+        elif mode == "image":
+            pixel, bucket_id = self._process_image(single_image)
         else:
-            raise ValueError(f"Invalid item: {item.keys()}")
+            pixel, bucket_id = self._process_video(item["mp4"])
 
         return pixel, caption, bucket_id, ref_image_pixel
 
@@ -603,33 +556,16 @@ class ImageVideoWebDataset(IterableDataset):
             k=1
         )[0]
 
-    def _get_dataset_and_iterator(self, mode: str):
-        if mode == 'image':
-            return self._image_dataset, self._image_iterator
-        elif mode == 'multiple_images':
-            return self._multiple_images_dataset, self._multiple_images_iterator
-        elif mode == 'multiple_videos':
-            return self._multiple_videos_dataset, self._multiple_videos_iterator
-        elif mode == 'video':
-            return self._video_dataset, self._video_iterator
-        else:
-            raise ValueError(f"Unknown mode: {mode}")
-
     def _get_next_item(self, mode: str):
-        dataset, iterator = self._get_dataset_and_iterator(mode)
-
-        try:
-            item = next(iterator, None)
-            if item is None:
-                dataset.set_epoch(dataset.epoch + 1)
-                new_iterator = iter(dataset)
-                setattr(self, f"_{mode}_iterator", new_iterator)
-                item = next(new_iterator)
-            return item
-        except Exception:
-            logger = get_logger()
-            logger.warning(f"Failed to read a {mode} sample.")
-            raise
+        dataset = getattr(self, f"_{mode}_dataset")
+        iterator = getattr(self, f"_{mode}_iterator")
+        item = next(iterator, None)
+        if item is None:
+            dataset.set_epoch(dataset.epoch + 1)
+            new_iterator = iter(dataset)
+            setattr(self, f"_{mode}_iterator", new_iterator)
+            item = next(new_iterator)
+        return item
 
     def __iter__(self):
         logger = get_logger()
@@ -642,7 +578,8 @@ class ImageVideoWebDataset(IterableDataset):
             try:
                 item = self._get_next_item(current_mode)
                 consecutive_read_failures = 0
-            except Exception:
+            except Exception as error:
+                logger.warning(f"Failed to read a {current_mode} sample: {error}")
                 consecutive_read_failures += 1
                 if consecutive_read_failures >= 50:
                     logger.error(
@@ -661,7 +598,7 @@ class ImageVideoWebDataset(IterableDataset):
                 consecutive_process_failures = 0
             except Exception as e:
                 consecutive_process_failures += 1
-                logger.warning("Skipped a sample that could not be processed.")
+                logger.warning(f"Skipped sample {key}: {e}")
                 if consecutive_process_failures >= 50:
                     logger.error(
                         "Exceeded item processing failure limit. "
@@ -678,8 +615,9 @@ class ImageVideoWebDataset(IterableDataset):
                           "key": key, "url": url, "bucket_id": bucket_id})
 
             if len(bucket) == bucket_id[0]:
-                yield bucket[:]
+                batch = bucket[:]
                 bucket.clear()
+                yield batch
                 current_mode = self._sample_task_mode()
 
     def state_dict(self):
@@ -690,32 +628,28 @@ class ImageVideoWebDataset(IterableDataset):
             "video": self._video_dataset.state_dict() if self._video_dataset is not None else None,
             "rng_state": self.rng.getstate(),
             "task_rng_state": self.task_rng.getstate(),
-            "current_buckets": self.current_buckets,
+            "current_buckets": {bucket: items[:] for bucket, items in self.current_buckets.items()},
         }
 
     def load_state_dict(self, state_dict):
-        if self._image_dataset is not None and state_dict["image"] is not None:
-            self._image_dataset.load_state_dict(state_dict["image"])
-            self._image_iterator = iter(self._image_dataset)
-        if self._multiple_images_dataset is not None and state_dict["multiple_images"] is not None:
-            self._multiple_images_dataset.load_state_dict(
-                state_dict["multiple_images"])
-            self._multiple_images_iterator = iter(
-                self._multiple_images_dataset)
-        if self._multiple_videos_dataset is not None and state_dict["multiple_videos"] is not None:
-            self._multiple_videos_dataset.load_state_dict(
-                state_dict["multiple_videos"])
-            self._multiple_videos_iterator = iter(
-                self._multiple_videos_dataset)
-        if self._video_dataset is not None and state_dict["video"] is not None:
-            self._video_dataset.load_state_dict(state_dict["video"])
-            self._video_iterator = iter(self._video_dataset)
+        for mode in ("image", "multiple_images", "multiple_videos", "video"):
+            dataset = getattr(self, f"_{mode}_dataset")
+            if dataset is not None and state_dict[mode] is not None:
+                dataset.load_state_dict(state_dict[mode])
+                setattr(self, f"_{mode}_iterator", iter(dataset))
         if "rng_state" in state_dict and state_dict["rng_state"] is not None:
             self.rng.setstate(state_dict["rng_state"])
         if "task_rng_state" in state_dict and state_dict["task_rng_state"] is not None:
             self.task_rng.setstate(state_dict["task_rng_state"])
         if "current_buckets" in state_dict and state_dict["current_buckets"] is not None:
-            self.current_buckets = state_dict["current_buckets"]
+            saved_buckets = state_dict["current_buckets"]
+            if saved_buckets.keys() != self.current_buckets.keys():
+                raise ValueError("Saved dataloader buckets do not match the configured buckets.")
+            # A full bucket in an older snapshot has already been delivered.
+            self.current_buckets = {
+                bucket: items[:] if len(items) < bucket[0] else []
+                for bucket, items in saved_buckets.items()
+            }
 
 
 def collate_batch(batch):

@@ -18,16 +18,13 @@
 # ==============================================================================
 
 from dataclasses import dataclass
-from typing import Optional, Tuple, Union
+from typing import Tuple, Union
 
 import torch
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
-from diffusers.utils import BaseOutput, logging
+from diffusers.utils import BaseOutput
 from diffusers.schedulers.scheduling_utils import SchedulerMixin
-
-
-logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
 @dataclass
@@ -50,7 +47,6 @@ class FlowMatchDiscreteScheduler(SchedulerMixin, ConfigMixin):
         shift: float = 1.0,
         reverse: bool = True,
         solver: str = "euler",
-        n_tokens: Optional[int] = None,
     ):
         sigmas = torch.linspace(1, 0, num_train_timesteps + 1)
 
@@ -62,33 +58,18 @@ class FlowMatchDiscreteScheduler(SchedulerMixin, ConfigMixin):
             sigmas[:-1] * num_train_timesteps).to(dtype=torch.float32)
 
         self._step_index = None
-        self._begin_index = None
 
-        self.supported_solver = ["euler"]
-        if solver not in self.supported_solver:
-            raise ValueError(
-                f"Solver {solver} not supported. Supported solvers: {self.supported_solver}"
-            )
+        if solver != "euler":
+            raise ValueError(f"Unsupported solver {solver!r}; expected 'euler'.")
 
     @property
     def step_index(self):
         return self._step_index
 
-    @property
-    def begin_index(self):
-        return self._begin_index
-
-    def set_begin_index(self, begin_index: int = 0):
-        self._begin_index = begin_index
-
-    def _sigma_to_t(self, sigma):
-        return sigma * self.config.num_train_timesteps
-
     def set_timesteps(
         self,
         num_inference_steps: int,
         device: Union[str, torch.device] = None,
-        n_tokens: int = None,
     ):
         """Set the inference timestep schedule."""
         self.num_inference_steps = num_inference_steps
@@ -117,17 +98,9 @@ class FlowMatchDiscreteScheduler(SchedulerMixin, ConfigMixin):
         return indices[pos].item()
 
     def _init_step_index(self, timestep):
-        if self.begin_index is None:
-            if isinstance(timestep, torch.Tensor):
-                timestep = timestep.to(self.timesteps.device)
-            self._step_index = self.index_for_timestep(timestep)
-        else:
-            self._step_index = self._begin_index
-
-    def scale_model_input(
-        self, sample: torch.Tensor, timestep: Optional[int] = None
-    ) -> torch.Tensor:
-        return sample
+        if isinstance(timestep, torch.Tensor):
+            timestep = timestep.to(self.timesteps.device)
+        self._step_index = self.index_for_timestep(timestep)
 
     def sd3_time_shift(self, t: torch.Tensor):
         return (self.config.shift * t) / (1 + (self.config.shift - 1) * t)
@@ -149,7 +122,7 @@ class FlowMatchDiscreteScheduler(SchedulerMixin, ConfigMixin):
             raise ValueError(
                 (
                     "Passing integer indices (e.g. from `enumerate(timesteps)`) as timesteps to"
-                    " `EulerDiscreteScheduler.step()` is not supported. Make sure to pass"
+                    " `FlowMatchDiscreteScheduler.step()` is not supported. Make sure to pass"
                     " one of the `scheduler.timesteps` as a timestep."
                 ),
             )
@@ -161,12 +134,7 @@ class FlowMatchDiscreteScheduler(SchedulerMixin, ConfigMixin):
 
         dt = self.sigmas[self.step_index + 1] - self.sigmas[self.step_index]
 
-        if self.config.solver == "euler":
-            prev_sample = sample + model_output.to(torch.float32) * dt
-        else:
-            raise ValueError(
-                f"Solver {self.config.solver} not supported. Supported solvers: {self.supported_solver}"
-            )
+        prev_sample = sample + model_output.to(torch.float32) * dt
 
         self._step_index += 1
 

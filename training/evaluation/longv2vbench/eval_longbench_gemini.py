@@ -747,6 +747,8 @@ if __name__ == '__main__':
     args = parser.parse_args()
     if min(args.eval_bucket_base_size) <= 0 or args.eval_fps <= 0 or args.eval_max_seconds <= 0:
         parser.error("Evaluation dimensions, FPS, and duration must be positive.")
+    if any(size % VAE_SPATIAL_FACTOR for size in args.eval_bucket_base_size):
+        parser.error(f"Evaluation dimensions must be multiples of {VAE_SPATIAL_FACTOR}.")
     if not 0 <= args.eval_crf <= 51:
         parser.error("Evaluation CRF must be between 0 and 51.")
     if args.max_workers <= 0 or args.max_attempts <= 0 or args.retry_sleep < 0:

@@ -32,7 +32,7 @@ from src.utils import (
     find_latest_checkpoint,
 )
 from src.utils.logging import setup_logger
-from src.utils.training import backward_if_finite, log_bucket_batch_sizes, step_optimizer, synchronize_batch_frames
+from src.utils.training import backward_if_finite, build_token_timesteps, log_bucket_batch_sizes, step_optimizer, synchronize_batch_frames
 from src.utils.activation_checkpointing import apply_activation_checkpointing
 from src.utils.checkpoint import load_checkpoint, save_checkpoint
 
@@ -101,7 +101,7 @@ def sample_noise_and_timestep(
     cfg: ExpConfig,
     noise_generator_cuda: torch.Generator,
     noise_generator_cpu: torch.Generator,
-    model: torch.nn.Module | None = None,
+    model: torch.nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     noise = torch.randn(
         latents.shape,
@@ -110,35 +110,18 @@ def sample_noise_and_timestep(
         device=latents.device
     )
 
-    use_chunkwise = (
-        model is not None
-        and getattr(cfg, "causal_forcing_strategy", None) in SUPPORTED_FORCING_STRATEGIES
-        and getattr(model.config, "causal", False)
+    chunk_size = model.config.chunk_size
+    total_latent_frames = latents.shape[-3]
+    num_chunks = (total_latent_frames + chunk_size - 1) // chunk_size
+    chunk_sigmas = _sample_sigmas_scalar(
+        (latents.shape[0], num_chunks), latents, cfg, noise_generator_cpu
     )
-
-    if use_chunkwise:
-        chunk_size = getattr(model.config, "chunk_size", None)
-        if chunk_size is None or chunk_size <= 0:
-            raise ValueError(
-                f"`chunk_size` must be positive when causal forcing is enabled, got {chunk_size}."
-            )
-        total_latent_frames = latents.shape[-3]
-        num_chunks = (total_latent_frames + chunk_size - 1) // chunk_size
-        chunk_sigmas = _sample_sigmas_scalar(
-            (latents.shape[0], num_chunks), latents, cfg, noise_generator_cpu
-        )
-        sigmas = chunk_sigmas.to(device=latents.device)
-        chunk_ids = torch.div(
-            torch.arange(total_latent_frames, device=latents.device),
-            chunk_size,
-            rounding_mode="floor",
-        )
-        sigmas = sigmas[:, chunk_ids]
-    else:
-        sigmas = _sample_sigmas_scalar(
-            (latents.shape[0],), latents, cfg, noise_generator_cpu
-        )
-        sigmas = sigmas.to(device=latents.device)
+    chunk_ids = torch.div(
+        torch.arange(total_latent_frames, device=latents.device),
+        chunk_size,
+        rounding_mode="floor",
+    )
+    sigmas = chunk_sigmas.to(device=latents.device)[:, chunk_ids]
 
     timesteps = (sigmas * 1000)
 
@@ -236,14 +219,10 @@ def _resampling_forcing_rollout(
     noise = torch.randn(clean_target.shape, generator=noise_generator_cuda, device=device, dtype=dtype)
     model_dtype = model.dtype
     prompt_embeds = prompt_embeds.to(dtype=model_dtype)
-    if isinstance(ref_image_latent, list):
+    if ref_image_latent is not None:
         ref_image_latent = [latent.to(dtype=model_dtype) if latent is not None else None for latent in ref_image_latent]
-    elif ref_image_latent is not None:
-        ref_image_latent = ref_image_latent.to(dtype=model_dtype)
     generated_history = clean_target.clone()
 
-    patch_size = model.config.patch_size
-    spatial_tokens = (clean_target.shape[-2] // patch_size[1]) * (clean_target.shape[-1] // patch_size[2])
     for window in chunk_windows:
         chunk_index = window["chunk_idx"]
         chunk_start, chunk_end = window["chunk_start"], window["chunk_end"]
@@ -263,7 +242,7 @@ def _resampling_forcing_rollout(
         hidden_states[:, :, -active_frames:] = noisy_chunk.to(dtype=model_dtype)
         frame_timesteps = sigma.new_zeros((batch_size, history.shape[2]))
         frame_timesteps[:, -active_frames:] = sigma[:, None] * 1000.0
-        token_timesteps = frame_timesteps[:, ::patch_size[0]].repeat_interleave(spatial_tokens, dim=1)
+        token_timesteps = build_token_timesteps(frame_timesteps, hidden_states, model)
         model_kwargs = dict(
             hidden_states=hidden_states,
             clean_video_latent=history,
@@ -307,23 +286,14 @@ def prepare_forcing_inputs(
         latents, cfg, noise_generator_cuda, noise_generator_cpu, model=model,
     )
     target_clean, target_noise = latents[:, -1], noise[:, -1]
-    if sigmas.ndim == 1:
-        sigma_view = sigmas.view(-1, 1, 1, 1, 1)
-    elif sigmas.ndim == 2:
-        sigma_view = sigmas[:, None, :, None, None]
-    else:
-        raise ValueError(f"Unsupported sigma shape: {tuple(sigmas.shape)}")
+    sigma_view = sigmas[:, None, :, None, None]
     noisy_target = (1 - sigma_view) * target_clean + sigma_view * target_noise
     target = target_noise - target_clean
     forcing_inputs = dict(additional_inputs)
-    if latents.shape[1] > 1:
-        forcing_inputs["ref_video_latent"] = rearrange(latents[:, :-1], "b n c t h w -> b c (n t) h w")
+    if forcing_inputs["ref_video_latent"] is not None:
         reference_drop_rate = float(getattr(cfg, "ref_cfg_rate", 0.0))
         if reference_drop_rate > 0.0 and rng.random() < reference_drop_rate:
             forcing_inputs["ref_video_latent"] = None
-    else:
-        forcing_inputs["ref_video_latent"] = None
-    forcing_inputs["ref_image_latent"] = additional_inputs.get("ref_image_latents")
     if getattr(model.config, "causal", False) and additional_inputs["task_type"] in ("t2v", "v2v"):
         warmup_steps = int(getattr(cfg, "resampling_forcing_warmup_steps", 0))
         if strategy == "teacher_forcing" or step <= warmup_steps:
@@ -357,55 +327,9 @@ def prepare_inputs(
     pixel_values_fused = rearrange(
         pixel_values, "b n c t h w -> (b n) c t h w")
 
-    is_causal = getattr(pipeline.transformer.config, "causal", False)
-    dit_chunk_size = getattr(pipeline.transformer.config, "chunk_size", None)
-    total_pixel_frames = pixel_values_fused.shape[2]
-    if (total_pixel_frames - 1) % pipeline.vae.ffactor_temporal:
-        raise ValueError(f"Training videos must contain {pipeline.vae.ffactor_temporal}n+1 frames, got {total_pixel_frames}.")
-
-    use_chunkwise_encode = (
-        is_causal
-        and dit_chunk_size is not None
-        and dit_chunk_size > 0
-        and total_pixel_frames > 1
+    latents = pipeline._sample_vae_latents(
+        pixel_values_fused, enable_denormalization=cfg.enable_denormalization, generator=generator,
     )
-
-    if use_chunkwise_encode:
-        ffactor_t = pipeline.vae.ffactor_temporal
-        window_pixels = dit_chunk_size * ffactor_t
-        window_frames = 1 + window_pixels
-        stride = ffactor_t
-        T = total_pixel_frames
-        num_latents = (T - 1) // stride + 1
-
-        lat_list = []
-        for k in range(num_latents):
-            if k == 0:
-                window = pixel_values_fused[:, :, :1]
-            else:
-                end_frame = k * stride
-                start_frame = max(0, end_frame - window_pixels)
-                window = pixel_values_fused[:, :, start_frame:end_frame + 1]
-                pad_needed = window_frames - window.shape[2]
-                if pad_needed > 0:
-                    pad = pixel_values_fused[:, :, :1].expand(-1, -1, pad_needed, -1, -1)
-                    window = torch.cat([pad, window], dim=2)
-
-            if cfg.enable_denormalization:
-                h = pipeline.vae.encode(window).latent_dist.sample(generator)
-                h = pipeline.normalize_latents(h)
-            else:
-                h = pipeline.vae.encode(window)
-            lat_list.append(h[:, :, -1:])
-
-        latents = torch.cat(lat_list, dim=2)
-    else:
-        if cfg.enable_denormalization:
-            latents = pipeline.vae.encode(
-                pixel_values_fused).latent_dist.sample(generator)
-            latents = pipeline.normalize_latents(latents)
-        else:
-            latents = pipeline.vae.encode(pixel_values_fused)
 
     latents = rearrange(latents, "(b n) c t h w -> b n c t h w", b=batch_size)
 
@@ -414,31 +338,19 @@ def prepare_inputs(
     is_video = task_type == "t2v"
     is_multi_item = task_type in {"i2i", "v2v"}
 
-    reference_latents = None
+    ref_video_latent = rearrange(latents[:, :-1], "b n c t h w -> b c (n t) h w") if is_multi_item else None
     ref_image_latents = None
-
-    if is_multi_item:
-        loss_mask = torch.ones_like(latents[:, -1])
-        reference_latents = latents[:, :-1]
-        if ref_image_pixels is not None and any(p is not None for p in ref_image_pixels):
-            ref_image_latents = []
-            for idx, pixel in enumerate(ref_image_pixels):
-                if pixel is None:
-                    ref_image_latents.append(None)
-                    continue
-                if pixel.dim() != 4:
-                    raise ValueError(
-                        f"Expected ref_image_pixel shape [c, t, h, w], got {tuple(pixel.shape)}."
-                    )
-                ref_img = pixel.unsqueeze(0).to(device=device, dtype=dtype)
-                if cfg.enable_denormalization:
-                    ref_lat = pipeline.vae.encode(ref_img).latent_dist.sample()
-                    ref_lat = pipeline.normalize_latents(ref_lat)
-                else:
-                    ref_lat = pipeline.vae.encode(ref_img)
-                ref_image_latents.append(ref_lat[:, :, :1])
-    else:
-        loss_mask = torch.ones_like(latents[:, 0] if latents.ndim == 6 else latents)
+    if is_multi_item and ref_image_pixels is not None and any(p is not None for p in ref_image_pixels):
+        ref_image_latents = []
+        for pixel in ref_image_pixels:
+            if pixel is None:
+                ref_image_latents.append(None)
+                continue
+            if pixel.dim() != 4:
+                raise ValueError(f"Expected ref_image_pixel shape [c, t, h, w], got {tuple(pixel.shape)}.")
+            ref_img = pixel.unsqueeze(0).to(device=device, dtype=dtype)
+            ref_lat = pipeline._sample_vae_latents(ref_img, enable_denormalization=cfg.enable_denormalization)
+            ref_image_latents.append(ref_lat[:, :, :1])
 
     if is_image or is_video:
         template_type = 'image' if is_image else 'video'
@@ -450,7 +362,7 @@ def prepare_inputs(
             max_sequence_length=cfg.text_token_max_length,
         )
     elif is_multi_item:
-        if cfg.use_vit and task_type in ('i2i', 'v2v'):
+        if cfg.use_vit:
             cfg_prompt = build_multiple_images_cfg_prompt(1)
             caption = [
                 cfg_prompt if rng.random() < cfg.cfg_rate
@@ -458,22 +370,13 @@ def prepare_inputs(
                 for c in caption
             ]
 
-            if task_type == 'v2v':
-                prompt_images = (pixel_values[:, 0, :, 0] + 1) * 127.5
-                prompt_embeds, prompt_embeds_mask = pipeline.encode_prompt_multiple_images(
-                    prompt=caption,
-                    images=prompt_images,
-                    device=device,
-                    max_sequence_length=cfg.text_token_max_length,
-                )
-            else:
-                prompt_images = build_multi_item_prompt_images(pixel_values)
-                prompt_embeds, prompt_embeds_mask = pipeline.encode_prompt_multiple_images(
-                    prompt=caption,
-                    images=prompt_images,
-                    device=device,
-                    max_sequence_length=cfg.text_token_max_length,
-                )
+            prompt_images = build_multi_item_prompt_images(pixel_values)
+            prompt_embeds, prompt_embeds_mask = pipeline.encode_prompt_multiple_images(
+                prompt=caption,
+                images=prompt_images,
+                device=device,
+                max_sequence_length=cfg.text_token_max_length,
+            )
         else:
             template_type = 'image' if task_type == 'i2i' else 'video'
             caption = ["" if rng.random() < cfg.cfg_rate else c for c in caption]
@@ -487,10 +390,9 @@ def prepare_inputs(
         raise ValueError("Invalid input data format.")
 
     additional_inputs = {
-        "loss_mask": loss_mask,
         "task_type": task_type,
-        "reference_latents": reference_latents,
-        "ref_image_latents": ref_image_latents,
+        "ref_video_latent": ref_video_latent,
+        "ref_image_latent": ref_image_latents,
     }
     return latents, prompt_embeds, prompt_embeds_mask, additional_inputs
 
@@ -505,7 +407,7 @@ def forward_and_compute_loss(
     target: torch.Tensor,
     additional_inputs: dict[str, torch.Tensor | str],
 ) -> torch.Tensor:
-    """Masked target flow-matching loss with ground-truth or resampled history."""
+    """Target flow-matching loss with ground-truth or resampled history."""
     noisy_model_input = noisy_model_input.to(
         dtype=model.dtype, device=model.device)
 
@@ -517,34 +419,19 @@ def forward_and_compute_loss(
         ref_video_latent = ref_video_latent.to(dtype=model.dtype, device=model.device)
     ref_image_latent = additional_inputs.get("ref_image_latent")
     if ref_image_latent is not None:
-        if isinstance(ref_image_latent, list):
-            ref_image_latent = [
-                latent.to(dtype=model.dtype, device=model.device) if latent is not None else None
-                for latent in ref_image_latent
-            ]
-        else:
-            ref_image_latent = ref_image_latent.to(dtype=model.dtype, device=model.device)
+        ref_image_latent = [
+            latent.to(dtype=model.dtype, device=model.device) if latent is not None else None
+            for latent in ref_image_latent
+        ]
 
     model_kwargs = dict(
         hidden_states=noisy_model_input,
-        timestep=timesteps,
+        timestep=build_token_timesteps(timesteps, noisy_model_input, model),
         encoder_hidden_states=prompt_embeds,
         encoder_hidden_states_mask=prompt_embeds_mask,
         return_dict=False,
     )
 
-    if timesteps.ndim == 2:
-        patch_size = getattr(model.config, "patch_size", [1, 2, 2])
-        _, _, t_latent, h_latent, w_latent = noisy_model_input.shape
-        t_patch = t_latent // patch_size[0]
-        h_patch = h_latent // patch_size[1]
-        w_patch = w_latent // patch_size[2]
-        spatial_tokens = h_patch * w_patch
-        sampled_ts = timesteps[:, ::patch_size[0]]
-        token_timesteps = sampled_ts.unsqueeze(-1).expand(-1, -1, spatial_tokens).reshape(
-            timesteps.shape[0], t_patch * spatial_tokens
-        )
-        model_kwargs["timestep"] = token_timesteps
     if clean_video_latent is not None:
         model_kwargs["clean_video_latent"] = clean_video_latent
     if ref_video_latent is not None:
@@ -554,11 +441,7 @@ def forward_and_compute_loss(
 
     model_pred = model(**model_kwargs)
 
-    loss_mask = additional_inputs['loss_mask']
-    loss = F.mse_loss(model_pred[0].float(), target.float(),
-                      reduction="none")
-    loss = loss * loss_mask
-    return loss.sum() / loss_mask.sum().clamp_min(1)
+    return F.mse_loss(model_pred[0].float(), target.float())
 
 
 def setup_model_and_optimizer(cfg: ExpConfig, device: torch.device) -> tuple[torch.nn.Module, torch.optim.Optimizer, Any]:
@@ -645,7 +528,7 @@ def main(cfg: ExpConfig):
 
     dit, optimizer, lr_scheduler = setup_model_and_optimizer(cfg, device)
 
-    init_step, epoch = 0, 0
+    init_step = 0
     if cfg.auto_resume:
         latest_ckpt_dir = find_latest_checkpoint(ckpt_dir)
         if latest_ckpt_dir is not None:
@@ -666,10 +549,9 @@ def main(cfg: ExpConfig):
             logger.info("No checkpoint folder found.")
     if cfg.resume_from_checkpoint is not None:
         logger.info(f"Resuming from checkpoint: {cfg.resume_from_checkpoint}")
-        init_step, epoch = load_checkpoint(
+        init_step = load_checkpoint(
             model=dit,
             path=cfg.resume_from_checkpoint,
-            device=device,
             optimizer=optimizer if cfg.resume_optimizer else None,
             scheduler=lr_scheduler if cfg.resume_optimizer else None,
             dataloader=train_dataloader if cfg.resume_dataloader else None,
@@ -801,7 +683,6 @@ def main(cfg: ExpConfig):
                 save_dir=ckpt_dir,
                 step=step,
                 global_rank=global_rank,
-                epoch=epoch,
                 optimizer=optimizer,
                 scheduler=lr_scheduler,
                 dataloader=train_dataloader,

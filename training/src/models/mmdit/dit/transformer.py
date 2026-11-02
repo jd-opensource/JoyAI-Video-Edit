@@ -530,7 +530,6 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         dtype: Optional[torch.dtype] = None,
         device: Optional[torch.device] = None,
         dit_modulation_type: str = "wanx",
-        attn_backend: str = 'flash_attn',
         unpatchify_new: bool = False,
         theta: int = 256,
         chunk_size: Optional[int] = 1,
@@ -553,7 +552,6 @@ class Transformer3DModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         self.rope_dim_list = rope_dim_list
         self.dit_modulation_type = dit_modulation_type
         self.mm_double_blocks_depth = mm_double_blocks_depth
-        self.attn_backend = attn_backend
         self.rope_type = rope_type
         self.unpatchify_new = unpatchify_new
         self.theta = theta

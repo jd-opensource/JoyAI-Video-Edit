@@ -1,5 +1,5 @@
 import torch
-from transformers import Qwen2Tokenizer, Qwen2_5_VLModel, Qwen3VLModel
+from transformers import AutoModel, Qwen2Tokenizer
 
 
 def load_text_encoder(
@@ -9,14 +9,7 @@ def load_text_encoder(
     attn_implementation: str = "sdpa",
 ):
     """Load a frozen multimodal backbone and tokenizer for prompt conditioning."""
-    ckpt_name = text_encoder_ckpt.lower()
-    is_qwen3_vl_family = (
-        'qwen3-vl-8b-instruct' in ckpt_name
-        or 'joyomni' in ckpt_name
-    )
-
-    model_class = Qwen3VLModel if is_qwen3_vl_family else Qwen2_5_VLModel
-    model, loading = model_class.from_pretrained(
+    model, loading = AutoModel.from_pretrained(
         text_encoder_ckpt,
         dtype=torch_dtype,
         local_files_only=True,

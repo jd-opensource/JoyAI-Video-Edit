@@ -20,8 +20,7 @@ def apply_activation_checkpointing(
 
         for index, (layer_id, block) in enumerate(blocks.named_children()):
             if index % skip_interval == 0:
-                checkpointed_block = checkpoint_wrapper(
-                    block, preserve_rng_state=False)
+                checkpointed_block = checkpoint_wrapper(block)
                 blocks.register_module(layer_id, checkpointed_block)
 
     return module

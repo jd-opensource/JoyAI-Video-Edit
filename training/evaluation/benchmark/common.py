@@ -8,7 +8,6 @@ import logging
 import math
 import os
 from pathlib import Path
-from typing import Any
 
 from PIL import Image
 import torch
@@ -19,7 +18,7 @@ from src.config import DEFAULT_VIDEO_RESOLUTION, VAE_TEMPORAL_FACTOR, load_confi
 from src.distributed.parallel_states import clean_dist_env, init_distributed_environment
 from src.models import load_dit, load_pipeline
 from src.dataset.bucket_util import BucketGroup, resize_pixels
-from src.utils import _resolve_full_length_target_frames, extract_video_tensor, save_video, seed_everything
+from src.utils import _resolve_full_length_target_frames, save_video, seed_everything
 
 
 RESOLUTIONS = {480: (480, 840), 720: DEFAULT_VIDEO_RESOLUTION}
@@ -148,19 +147,8 @@ def _get_video_fps(video_reader) -> float | None:
     return None
 
 
-def _get_video_batch(video_reader: Any, frame_idx: list[int]) -> torch.Tensor:
-    if hasattr(video_reader, "get_batch"):
-        pixel = video_reader.get_batch(frame_idx)
-    else:
-        pixel = video_reader.get_frames_at(frame_idx).data
-
-    if pixel.ndim != 4:
-        raise ValueError(f"Unexpected video batch shape: {tuple(pixel.shape)}")
-    if pixel.shape[1] in (1, 3):
-        return pixel
-    if pixel.shape[-1] in (1, 3):
-        return pixel.permute(0, 3, 1, 2)
-    raise ValueError(f"Unexpected video channel layout: {tuple(pixel.shape)}")
+def _get_video_batch(video_reader, frame_idx: list[int]) -> torch.Tensor:
+    return video_reader.get_batch(frame_idx).permute(0, 3, 1, 2)
 
 
 def load_reference_video(video_path: Path, cfg, resolution: int, num_frames: int):
@@ -250,16 +238,18 @@ def run_inference(args, items: list[BenchmarkItem]) -> None:
         for item in tqdm(assigned, desc=f"rank {data_rank}", disable=data_rank != 0):
             output_dir = args.save_path / "fullset" / item.category
             result_path = output_dir / f"{item.video_path.stem}.mp4"
-            if result_path.exists():
+            source_path = output_dir / f"{item.video_path.stem}_src.mp4"
+            prompt_path = output_dir / f"{item.video_path.stem}_prompt.txt"
+            if all(path.is_file() and path.stat().st_size > 0 for path in (result_path, source_path, prompt_path)):
                 continue
             generator = torch.Generator(device=device).manual_seed(args.seed)
             pipeline_kwargs, source_pixels = build_pipeline_kwargs(item, args, cfg, generator)
             with torch.inference_mode():
                 result = pipeline(**pipeline_kwargs)
             output_dir.mkdir(parents=True, exist_ok=True)
-            save_video(extract_video_tensor(result[0, -1]), str(result_path), fps=cfg.fps)
-            save_video(extract_video_tensor(source_pixels), str(output_dir / f"{item.video_path.stem}_src.mp4"), fps=cfg.fps)
-            (output_dir / f"{item.video_path.stem}_prompt.txt").write_text(item.prompt, encoding="utf-8")
+            save_video(result[0, -1], str(result_path), fps=cfg.fps)
+            save_video(source_pixels, str(source_path), fps=cfg.fps)
+            prompt_path.write_text(item.prompt, encoding="utf-8")
         dist.barrier()
     finally:
         clean_dist_env()

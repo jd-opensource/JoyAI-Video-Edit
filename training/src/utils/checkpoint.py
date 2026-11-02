@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 import torch
 from torch.distributed.checkpoint.state_dict import (StateDictOptions,
@@ -15,12 +16,39 @@ _LOAD_OPTIONS = StateDictOptions(
     full_state_dict=True, broadcast_from_rank0=True)
 
 
+def resolve_checkpoint_path(path: str | Path) -> Path:
+    path = Path(path)
+    if path.is_file():
+        return path
+    if not path.is_dir():
+        raise FileNotFoundError(f"Checkpoint does not exist: {path}")
+    match = re.fullmatch(r"global_step(\d+)", path.name)
+    if match:
+        checkpoint = path / f"step_{int(match.group(1))}.pth"
+        if checkpoint.is_file():
+            return checkpoint
+    candidates = sorted(path.glob("*.pth"))
+    if not candidates:
+        raise FileNotFoundError(f"No .pth checkpoint found in {path}.")
+    if len(candidates) != 1:
+        raise ValueError(f"Multiple checkpoints found in {path}; specify the checkpoint file.")
+    return candidates[0]
+
+
+def load_dataloader_state(dataloader, checkpoint_path: Path, step: int) -> None:
+    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    path = checkpoint_path.parent / "dataloader" / f"dataloader_step{step}_rank{rank}.pth"
+    if not path.is_file():
+        raise FileNotFoundError(f"Requested dataloader resume state is missing: {path}")
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    dataloader.load_state_dict(state["dataloader"])
+
+
 def save_checkpoint(
     model: torch.nn.Module | FSDPModule,
     save_dir: str | Path,
     step: int,
     global_rank: int,
-    epoch: int = 0,
     optimizer: torch.optim.Optimizer = None,
     scheduler: torch.optim.lr_scheduler._LRScheduler = None,
     dataloader: StatefulDataLoader = None
@@ -32,7 +60,6 @@ def save_checkpoint(
 
     state_dict = {
         "step": step,
-        "epoch": epoch,
         "model": get_model_state_dict(model, options=_SAVE_OPTIONS)
     }
 
@@ -60,49 +87,29 @@ def save_checkpoint(
 def load_checkpoint(
     model: torch.nn.Module | FSDPModule,
     path: str | Path,
-    device: torch.device,
     optimizer: torch.optim.Optimizer = None,
     scheduler: torch.optim.lr_scheduler._LRScheduler = None,
     dataloader: torch.utils.data.DataLoader = None,
-) -> tuple[int, int]:
+) -> int:
     logger = get_logger()
 
-    if isinstance(path, str):
-        path = Path(path)
-
-    if path.suffix == '.pth':
-        checkpoint_path = path
-        path = path.parent
-    else:
-        ckpt_paths = sorted(path.glob("*.pth"))
-        if len(ckpt_paths) < 1:
-            raise FileNotFoundError(f"Checkpoint {path} does not exist.")
-        checkpoint_path = ckpt_paths[0]
-
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"Checkpoint {path} does not exist.")
-
+    checkpoint_path = resolve_checkpoint_path(path)
     logger.info(f"Loading checkpoint from {checkpoint_path}")
     state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    for key, component in (("optimizer", optimizer), ("scheduler", scheduler)):
+        if component is not None and key not in state_dict:
+            raise KeyError(f"Requested resume state {key!r} is missing from {checkpoint_path}.")
 
     set_model_state_dict(model, state_dict["model"], options=_LOAD_OPTIONS)
 
-    if optimizer is not None and "optimizer" in state_dict:
+    if optimizer is not None:
         set_optimizer_state_dict(
             model, optimizer, state_dict["optimizer"], options=_LOAD_OPTIONS)
 
-    if scheduler is not None and "scheduler" in state_dict:
+    if scheduler is not None:
         scheduler.load_state_dict(state_dict["scheduler"])
 
-    dataloader_path = Path(path / "dataloader")
-    if dataloader is not None and dataloader_path.exists():
-        global_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        step = state_dict.get("step", 0)
-        dataloader_step_rank_path = dataloader_path / \
-            f"dataloader_step{step}_rank{global_rank}.pth"
-        _state_dict = torch.load(
-            dataloader_step_rank_path, map_location="cpu", weights_only=False)
-        dataloader_rank = _state_dict["dataloader"]
-        dataloader.load_state_dict(dataloader_rank)
+    if dataloader is not None:
+        load_dataloader_state(dataloader, checkpoint_path, state_dict.get("step", 0))
 
-    return state_dict.get("step", 0), state_dict.get("epoch", 0)
+    return state_dict.get("step", 0)

@@ -63,10 +63,6 @@ class WebDataset(WebDatasetBase):
                     features[field_name] = datasets.Image()
             for field_name in first_examples[0]:
                 extension = field_name.rsplit(".", 1)[-1]
-                if extension in self.AUDIO_EXTENSIONS:
-                    features[field_name] = datasets.Audio()
-            for field_name in first_examples[0]:
-                extension = field_name.rsplit(".", 1)[-1]
                 if extension in self.VIDEO_EXTENSIONS:
                     features[field_name] = datasets.Video(decode=False)
 

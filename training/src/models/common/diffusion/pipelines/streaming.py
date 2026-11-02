@@ -156,16 +156,11 @@ class Pipeline(DiffusionPipeline):
         prompt: List[str],
         device: Optional[torch.device] = None,
         images: Optional[torch.Tensor | List[Image.Image] | List[torch.Tensor]] = None,
-        template_type: str = 'multiple_images',
         max_sequence_length: int = 1024,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         device = device or self._execution_device
-        if template_type != 'multiple_images':
-            raise ValueError(
-                f"template_type must be 'multiple_images' for image-conditioned prompts, got {template_type!r}"
-            )
-        template = self.prompt_template_encode[template_type]
-        drop_idx = self.prompt_template_encode_start_idx[template_type]
+        template = self.prompt_template_encode['multiple_images']
+        drop_idx = self.prompt_template_encode_start_idx['multiple_images']
         prompt = [p.replace(
             '<image>\n', '<|vision_start|><|image_pad|><|vision_end|>') for p in prompt]
         prompt = [template.format(p) for p in prompt]
@@ -408,6 +403,7 @@ class Pipeline(DiffusionPipeline):
         inputs: torch.Tensor,
         *,
         enable_denormalization: bool,
+        generator: Optional[torch.Generator] = None,
     ) -> torch.Tensor:
         is_causal = getattr(self.transformer.config, "causal", False)
         dit_chunk_size = getattr(self.transformer.config, "chunk_size", None)
@@ -442,22 +438,23 @@ class Pipeline(DiffusionPipeline):
                         pad = inputs[:, :, :1].expand(-1, -1, pad_needed, -1, -1)
                         window = torch.cat([pad, window], dim=2)
 
-                h = self._encode_vae_single(window, enable_denormalization=enable_denormalization)
+                h = self._encode_vae_single(window, enable_denormalization=enable_denormalization, generator=generator)
                 lat_list.append(h[:, :, -1:])
 
             return torch.cat(lat_list, dim=2)
 
-        return self._encode_vae_single(inputs, enable_denormalization=enable_denormalization)
+        return self._encode_vae_single(inputs, enable_denormalization=enable_denormalization, generator=generator)
 
     def _encode_vae_single(
         self,
         inputs: torch.Tensor,
         *,
         enable_denormalization: bool,
+        generator: Optional[torch.Generator] = None,
     ) -> torch.Tensor:
         original_device = inputs.device
         inputs = inputs.to(device=self.vae.device, dtype=self.vae.dtype)
-        latents = self.vae.encode(inputs).latent_dist.sample()
+        latents = self.vae.encode(inputs).latent_dist.sample(generator)
         if enable_denormalization:
             latents = self.normalize_latents(latents)
         return latents.to(original_device)

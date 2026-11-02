@@ -16,7 +16,6 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from diffusers import get_scheduler
-from einops import rearrange
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_model_state_dict,
@@ -42,11 +41,12 @@ from src.train_t2v import (
     sample_noise_and_timestep,
 )
 from src.utils import find_latest_checkpoint, seed_everything
+from src.utils.checkpoint import load_dataloader_state, resolve_checkpoint_path
 from src.utils.activation_checkpointing import apply_activation_checkpointing
 from src.utils.constants import PRECISION_TO_TYPE
 from src.utils.fsdp_load import maybe_load_fsdp_model
 from src.utils.logging import setup_logger
-from src.utils.training import backward_if_finite, log_bucket_batch_sizes, step_optimizer, synchronize_batch_frames
+from src.utils.training import backward_if_finite, build_token_timesteps, log_bucket_batch_sizes, step_optimizer, synchronize_batch_frames
 from src.utils.utils import build_from_config, get_obj_from_str
 from src.utils.lora import gather_lora_state_dict, validate_lora_state_dict
 
@@ -90,10 +90,6 @@ def dmd_generator_adapter_name(cfg: ExpConfig) -> str:
 
 def dmd_fake_score_adapter_name(cfg: ExpConfig) -> str:
     return str(getattr(cfg, "dmd_fake_score_lora_adapter_name", "fake_score"))
-
-
-def get_module_device(module: torch.nn.Module) -> torch.device:
-    return next(module.parameters()).device
 
 
 def _build_base_dit(cfg: ExpConfig, device: torch.device) -> torch.nn.Module:
@@ -143,24 +139,9 @@ def load_stage1_dit(
     return model
 
 
-def _adapter_name_fragment(adapter_name: str) -> str:
-    return f".{adapter_name}."
-
-
 def iter_adapter_parameters(model: torch.nn.Module, adapter_name: str) -> list[torch.nn.Parameter]:
-    fragment = _adapter_name_fragment(adapter_name)
+    fragment = f".{adapter_name}."
     return [param for name, param in model.named_parameters() if fragment in name]
-
-
-def set_trainable_adapter(model: torch.nn.Module, adapter_name: str | None) -> None:
-    for name, param in model.named_parameters():
-        is_lora_param = "lora_" in name
-        if adapter_name is None:
-            param.requires_grad_(False)
-        elif is_lora_param:
-            param.requires_grad_(True)
-        else:
-            param.requires_grad_(False)
 
 
 def make_optimizer(
@@ -241,33 +222,11 @@ def build_lora_config(cfg: ExpConfig, model: torch.nn.Module):
     )
 
 
-def activate_lora_adapter(model: torch.nn.Module, adapter_name: str | None) -> None:
+def activate_lora_adapter(model: torch.nn.Module, adapter_name: str | list[str] | None) -> None:
     if adapter_name is None:
         return
-    if not hasattr(model, "set_adapter"):
-        raise ValueError(f"Model does not support PEFT adapters, cannot activate adapter {adapter_name!r}.")
-    if hasattr(model, "enable_adapters"):
-        model.enable_adapters()
+    model.enable_adapters()
     model.set_adapter(adapter_name)
-
-
-def disable_lora_adapters(model: torch.nn.Module) -> None:
-    if hasattr(model, "disable_adapters"):
-        model.disable_adapters()
-
-
-def _active_adapters(model: torch.nn.Module) -> list[str] | None:
-    if not hasattr(model, "active_adapters"):
-        return None
-    try:
-        active = model.active_adapters()
-    except Exception:
-        return None
-    if active is None:
-        return None
-    if isinstance(active, str):
-        return [active]
-    return list(active)
 
 
 @contextmanager
@@ -281,18 +240,15 @@ def lora_adapter_context(
         yield
         return
 
-    previous_adapters = _active_adapters(model)
+    previous_adapters = model.active_adapters()
     if disable_adapters:
-        disable_lora_adapters(model)
+        model.disable_adapters()
     else:
         activate_lora_adapter(model, adapter_name)
     try:
         yield
     finally:
-        if previous_adapters:
-            activate_lora_adapter(model, previous_adapters)
-        elif not disable_adapters and hasattr(model, "enable_adapters"):
-            model.enable_adapters()
+        activate_lora_adapter(model, previous_adapters)
 
 
 @contextmanager
@@ -379,7 +335,8 @@ def load_lora_base_dit(
         cpu_offload=cfg.cpu_offload,
         pin_cpu_memory=cfg.pin_cpu_memory,
     )
-    set_trainable_adapter(model, generator_adapter_name)
+    for name, param in model.named_parameters():
+        param.requires_grad_("lora_" in name)
     return model.eval(), generator_adapter_name, fake_score_adapter_name
 
 
@@ -481,16 +438,8 @@ def setup_dmd_models_and_optimizers(
     )
 
 
-def _sigma_view(sigmas: torch.Tensor, latents: torch.Tensor) -> torch.Tensor:
-    if sigmas.ndim == 1:
-        return sigmas.view(-1, 1, 1, 1, 1)
-    if sigmas.ndim == 2:
-        return sigmas[:, None, :, None, None]
-    raise ValueError(f"Unsupported sigma shape: {tuple(sigmas.shape)}")
-
-
 def flow_to_x0(noisy_latents: torch.Tensor, flow_pred: torch.Tensor, sigmas: torch.Tensor) -> torch.Tensor:
-    sigma = _sigma_view(sigmas.to(device=noisy_latents.device, dtype=noisy_latents.dtype), noisy_latents)
+    sigma = sigmas.to(device=noisy_latents.device, dtype=noisy_latents.dtype)[:, None, :, None, None]
     return noisy_latents - sigma * flow_pred.to(dtype=noisy_latents.dtype)
 
 
@@ -499,19 +448,10 @@ def build_noisy_inputs_and_targets_from_sigmas(
     noise: torch.Tensor,
     sigmas: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    sigma = _sigma_view(sigmas.to(device=latents.device, dtype=latents.dtype), latents)
+    sigma = sigmas.to(device=latents.device, dtype=latents.dtype)[:, None, :, None, None]
     noisy_model_input = (1 - sigma) * latents + sigma * noise
     target = noise - latents
     return noisy_model_input, target
-
-
-def _has_ref_image_latent(ref_image_latent: Any) -> bool:
-    """Return whether the batch contains reference-image latents."""
-    if torch.is_tensor(ref_image_latent):
-        return True
-    if isinstance(ref_image_latent, list):
-        return any(item is not None for item in ref_image_latent)
-    return False
 
 
 class ResilientDMDController:
@@ -777,64 +717,6 @@ class ResilientDMDController:
         self.ema_cnt.copy_(saved_count[indices].to(self.device))
 
 
-def _build_token_timesteps(
-    timesteps: torch.Tensor,
-    noisy_model_input: torch.Tensor,
-    model: torch.nn.Module,
-) -> torch.Tensor:
-    """Expand frame timesteps to match the target token sequence."""
-    if timesteps.ndim != 2:
-        return timesteps
-    patch_size = getattr(model.config, "patch_size", [1, 2, 2])
-    _, _, t_latent, h_latent, w_latent = noisy_model_input.shape
-    t_patch = t_latent // patch_size[0]
-    h_patch = h_latent // patch_size[1]
-    w_patch = w_latent // patch_size[2]
-    spatial_tokens = h_patch * w_patch
-    sampled_ts = timesteps[:, :: patch_size[0]]
-    return sampled_ts.unsqueeze(-1).expand(-1, -1, spatial_tokens).reshape(
-        timesteps.shape[0], t_patch * spatial_tokens
-    )
-
-
-def _flatten_multi_item_latents(
-    latents: torch.Tensor,
-    additional_inputs: dict[str, Any],
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """Split (B, N, C, T, H, W) latents into a target and source conditioning."""
-    if latents.ndim != 6:
-        target_latents = latents
-        ref_video_latent_5d = None
-    else:
-        num_items = latents.shape[1]
-        if num_items > 1:
-            ref_video_latent_5d = rearrange(latents[:, :-1], "b n c t h w -> b c (n t) h w")
-        else:
-            ref_video_latent_5d = None
-        target_latents = latents[:, -1]
-
-    additional_inputs["ref_video_latent"] = ref_video_latent_5d
-    additional_inputs["ref_image_latent"] = additional_inputs.get("ref_image_latents")
-    if additional_inputs.get("loss_mask") is not None:
-        loss_mask = additional_inputs["loss_mask"]
-        if loss_mask.ndim == 6:
-            additional_inputs["loss_mask"] = loss_mask[:, -1]
-    return target_latents, ref_video_latent_5d
-
-
-def _build_negative_prompt_images(
-    cfg: ExpConfig,
-    pixel_values: torch.Tensor,
-    task_type: str,
-    device: torch.device,
-) -> torch.Tensor | list[torch.Tensor]:
-    """Match negative-prompt visual tokens to the conditional branch."""
-    if task_type == "v2v":
-        return (pixel_values[:, 0, :, 0] + 1) * 127.5
-
-    return build_multi_item_prompt_images(pixel_values)
-
-
 def encode_negative_prompt(
     cfg: ExpConfig,
     pipeline: Any,
@@ -842,10 +724,9 @@ def encode_negative_prompt(
     *,
     task_type: str,
     pixel_values: torch.Tensor | None = None,
-    ref_image_pixels: list[torch.Tensor | None] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Encode the negative prompt with the same visual-token layout as the conditional prompt."""
-    device = get_module_device(pipeline.transformer)
+    device = pipeline.transformer.device
     negative_prompt = getattr(cfg, "dmd_negative_prompt", "")
     is_image = task_type in ("t2i", "i2i")
     template_type = "image" if is_image else "video"
@@ -860,9 +741,7 @@ def encode_negative_prompt(
 
         neg_prompt = f"<|im_start|>user\n<image>\n{negative_prompt}<|im_end|>\n"
         prompts = [neg_prompt] * batch_size
-        prompt_images = _build_negative_prompt_images(
-            cfg, pixel_values, task_type, device,
-        )
+        prompt_images = build_multi_item_prompt_images(pixel_values)
         prompt_embeds, prompt_embeds_mask = pipeline.encode_prompt_multiple_images(
             prompt=prompts,
             images=prompt_images,
@@ -903,14 +782,6 @@ def _prepare_score_additional_inputs(
     if history_latents is not None:
         clean_latents = torch.cat([history_latents.detach(), clean_latents], dim=2)
     score_inputs["clean_video_latent"] = clean_latents
-    if score_inputs.get("ref_video_latent") is None:
-        score_inputs.pop("ref_video_latent", None)
-    if score_inputs.get("ref_image_latent") is None:
-        ref_image = score_inputs.get("ref_image_latents")
-        if ref_image is not None:
-            score_inputs["ref_image_latent"] = ref_image
-        else:
-            score_inputs.pop("ref_image_latent", None)
     return score_inputs
 
 
@@ -926,8 +797,6 @@ def score_flow_prediction(
     """Score all target chunks in one forward with the SFT mask."""
     noisy_latents = noisy_latents.to(dtype=model.dtype)
     prompt_embeds = prompt_embeds.to(dtype=model.dtype)
-    if timesteps.ndim == 1:
-        timesteps = timesteps[:, None].expand(-1, noisy_latents.shape[2])
 
     history_frames = 0
     clean_video_latent = additional_inputs.get("clean_video_latent")
@@ -944,15 +813,12 @@ def score_flow_prediction(
         ref_video_latent = ref_video_latent.to(dtype=model.dtype)
     ref_image_latent = additional_inputs.get("ref_image_latent")
     if ref_image_latent is not None:
-        if isinstance(ref_image_latent, list):
-            ref_image_latent = [
-                latent.to(dtype=model.dtype) if latent is not None else None
-                for latent in ref_image_latent
-            ]
-        else:
-            ref_image_latent = ref_image_latent.to(dtype=model.dtype)
+        ref_image_latent = [
+            latent.to(dtype=model.dtype) if latent is not None else None
+            for latent in ref_image_latent
+        ]
 
-    token_timesteps = _build_token_timesteps(timesteps, noisy_latents, model)
+    token_timesteps = build_token_timesteps(timesteps, noisy_latents, model)
 
     model_kwargs = dict(
         hidden_states=noisy_latents,
@@ -1077,18 +943,9 @@ def compute_dmd_gradient(
         return torch.nan_to_num(gradient)
 
 
-def _masked_mean_loss(
-    loss: torch.Tensor,
-    mask: torch.Tensor,
-    normalizer: int | torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Use a shared valid-element count when reducing rollout segments."""
-    mask = mask.expand_as(loss)
-    if normalizer is None:
-        normalizer = mask.sum(dtype=loss.dtype)
-    else:
-        normalizer = torch.as_tensor(normalizer, device=loss.device, dtype=loss.dtype)
-    return (loss * mask).sum() / normalizer.clamp_min(1)
+def _mean_loss(loss: torch.Tensor, normalizer: int | None = None) -> torch.Tensor:
+    """Normalize rollout groups by the full rollout's element count."""
+    return loss.mean() if normalizer is None else loss.sum() / normalizer
 
 
 def compute_generator_dmd_loss(
@@ -1113,15 +970,14 @@ def compute_generator_dmd_loss(
     )
     target = (generated_latents.float() - gradient.float()).detach()
     loss = 0.5 * F.mse_loss(generated_latents.float(), target, reduction="none")
-    total_loss = _masked_mean_loss(loss, additional_inputs["loss_mask"], additional_inputs.get("loss_normalizer"))
+    total_loss = _mean_loss(loss, additional_inputs.get("loss_normalizer"))
     if gradient_stats is not None:
         with torch.no_grad():
             gradient_values = gradient.detach().float()
-            mask = additional_inputs["loss_mask"].detach().expand_as(gradient_values)
             moments = torch.stack((
-                (gradient_values.abs() * mask).sum(dtype=torch.float64),
-                (gradient_values.square() * mask).sum(dtype=torch.float64),
-                mask.sum(dtype=torch.float64),
+                gradient_values.abs().sum(dtype=torch.float64),
+                gradient_values.square().sum(dtype=torch.float64),
+                gradient_values.new_tensor(gradient_values.numel(), dtype=torch.float64),
             ))
             gradient_stats.add_(torch.where(torch.isfinite(total_loss.detach()), moments, 0.0))
     return total_loss
@@ -1147,7 +1003,7 @@ def compute_fake_score_loss(
         cfg, fake_score, noisy_latents, prompt_embeds, prompt_embeds_mask, timesteps, score_inputs,
     )
     loss = F.mse_loss(fake_flow.float(), target.float(), reduction="none")
-    return _masked_mean_loss(loss, additional_inputs["loss_mask"], additional_inputs.get("loss_normalizer"))
+    return _mean_loss(loss, additional_inputs.get("loss_normalizer"))
 
 
 def _sample_exit_index(num_timesteps: int) -> int:
@@ -1167,7 +1023,7 @@ def _expand_per_token_timestep(
     local_chunk_start: int = 0,
 ) -> torch.Tensor:
     """Set history-token time to zero and active-token time to timestep_value."""
-    patch_size = getattr(model.config, "patch_size", [1, 2, 2])
+    patch_size = model.config.patch_size
     batch_size, _, t_latent, h_latent, w_latent = window_latents.shape
     t_patch = t_latent // patch_size[0]
     h_patch = h_latent // patch_size[1]
@@ -1196,7 +1052,7 @@ def _run_streaming_model(
     prompt_embeds_mask: torch.Tensor | None,
     temporal_ids: torch.Tensor,
     ref_video_latent: torch.Tensor | None,
-    ref_image_latent: torch.Tensor | list[torch.Tensor | None] | None,
+    ref_image_latent: list[torch.Tensor | None] | None,
 ) -> torch.Tensor:
     """Conditional, cache-free rollout with zero-time history and active-only source/text."""
     model_kwargs = dict(
@@ -1211,12 +1067,9 @@ def _run_streaming_model(
     if ref_video_latent is not None:
         model_kwargs["ref_video_latent"] = ref_video_latent.to(dtype=model.dtype)
     if ref_image_latent is not None:
-        if isinstance(ref_image_latent, list):
-            model_kwargs["ref_image_latent"] = [
-                latent.to(dtype=model.dtype) if latent is not None else None for latent in ref_image_latent
-            ]
-        else:
-            model_kwargs["ref_image_latent"] = ref_image_latent.to(dtype=model.dtype)
+        model_kwargs["ref_image_latent"] = [
+            latent.to(dtype=model.dtype) if latent is not None else None for latent in ref_image_latent
+        ]
     with model.cache_context("cond"):
         return model(**model_kwargs)[0]
 
@@ -1308,9 +1161,7 @@ def generate_dmd_latents(
         source_latents = source_latents.to(device=device, dtype=torch.float32)
         num_source_chunks = (source_latents.shape[2] + chunk_size - 1) // chunk_size
     reference_latents = additional_inputs.get("ref_image_latent")
-    if torch.is_tensor(reference_latents):
-        reference_latents = reference_latents.to(device=device, dtype=torch.float32)
-    elif isinstance(reference_latents, list):
+    if reference_latents is not None:
         reference_latents = [latent.to(device=device, dtype=torch.float32) if latent is not None else None for latent in reference_latents]
 
     window_size = getattr(cfg, "dmd_generator_window_size", None)
@@ -1343,7 +1194,6 @@ def generate_dmd_latents(
                 context_latents, history_ids, chunk_size, total_frames, temporal_dim=2,
             ).detach()
         if use_long_rollout:
-            overrides["loss_mask"] = torch.ones_like(latents)
             overrides["loss_normalizer"] = context_latents.numel()
         if source_latents is not None:
             overrides["ref_video_latent"] = _gather_ref_chunks(source_latents, score_chunk_ids, chunk_size, num_source_chunks)
@@ -1390,7 +1240,7 @@ def generate_dmd_latents(
         layout = None
         if (
             controller is not None and controller.enabled and window_source is not None
-            and not _has_ref_image_latent(reference_latents) and local_start > 0
+            and not any(latent is not None for latent in (reference_latents or [])) and local_start > 0
             and chunk_index % controller.chunk_stride == 0
         ):
             layout = controller.build_layout(
@@ -1455,7 +1305,6 @@ def save_dmd_checkpoint(
     step: int,
     global_rank: int,
     cfg: ExpConfig | None = None,
-    epoch: int = 0,
     generator_optimizer: torch.optim.Optimizer | None = None,
     fake_score_optimizer: torch.optim.Optimizer | None = None,
     generator_scheduler: Any | None = None,
@@ -1477,7 +1326,6 @@ def save_dmd_checkpoint(
         target_modules = adapter_config.target_modules
         state_dict = {
             "step": step,
-            "epoch": epoch,
             "dmd_use_lora": True,
             "generator_adapter_name": generator_adapter_name,
             "fake_score_adapter_name": fake_score_adapter_name,
@@ -1494,7 +1342,6 @@ def save_dmd_checkpoint(
         generator_state_dict = get_model_state_dict(generator, options=_SAVE_OPTIONS)
         state_dict = {
             "step": step,
-            "epoch": epoch,
 
             "model": generator_state_dict,
             "fake_score": get_model_state_dict(fake_score, options=_SAVE_OPTIONS),
@@ -1529,25 +1376,23 @@ def load_dmd_checkpoint(
     generator: torch.nn.Module,
     fake_score: torch.nn.Module,
     path: str | Path,
-    device: torch.device,
     cfg: ExpConfig | None = None,
     generator_optimizer: torch.optim.Optimizer | None = None,
     fake_score_optimizer: torch.optim.Optimizer | None = None,
     generator_scheduler: Any | None = None,
     fake_score_scheduler: Any | None = None,
     dataloader: Any | None = None,
-) -> tuple[int, int]:
-    path = Path(path)
-    if path.name.endswith(".pth"):
-        checkpoint_path = path
-        path = path.parent
-    else:
-        ckpt_paths = sorted(path.glob("*.pth"))
-        if not ckpt_paths:
-            raise FileNotFoundError(f"Checkpoint {path} does not contain a .pth file.")
-        checkpoint_path = ckpt_paths[0]
-
+) -> int:
+    checkpoint_path = resolve_checkpoint_path(path)
     state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    for key, component in (
+        ("generator_optimizer", generator_optimizer),
+        ("fake_score_optimizer", fake_score_optimizer),
+        ("generator_scheduler", generator_scheduler),
+        ("fake_score_scheduler", fake_score_scheduler),
+    ):
+        if component is not None and key not in state_dict:
+            raise KeyError(f"Requested resume state {key!r} is missing from {checkpoint_path}.")
     if cfg is not None and dmd_uses_lora(cfg):
         try:
             from peft.utils.save_and_load import _insert_adapter_name_into_state_dict
@@ -1560,6 +1405,11 @@ def load_dmd_checkpoint(
         fake_score_lora_state_dict = state_dict.get("fake_score_lora")
         if generator_lora_state_dict is None or fake_score_lora_state_dict is None:
             raise KeyError("DMD LoRA checkpoint must contain `generator_lora` and `fake_score_lora` state dicts.")
+        adapter_config = state_dict.get("generator_lora_config")
+        if adapter_config is not None:
+            for model, adapter in ((generator, generator_adapter_name), (fake_score, fake_score_adapter_name)):
+                if model.peft_config[adapter].lora_alpha != adapter_config["lora_alpha"]:
+                    raise ValueError("Configured LoRA alpha does not match the checkpoint.")
 
         validate_lora_state_dict(generator, generator_lora_state_dict, generator_adapter_name)
         validate_lora_state_dict(fake_score, fake_score_lora_state_dict, fake_score_adapter_name)
@@ -1595,25 +1445,23 @@ def load_dmd_checkpoint(
         set_model_state_dict(generator, generator_state_dict, options=_LOAD_OPTIONS)
         set_model_state_dict(fake_score, state_dict["fake_score"], options=_LOAD_OPTIONS)
 
-    if generator_optimizer is not None and "generator_optimizer" in state_dict:
+    if generator_optimizer is not None:
         set_optimizer_state_dict(generator, generator_optimizer, state_dict["generator_optimizer"], options=_LOAD_OPTIONS)
-    if fake_score_optimizer is not None and "fake_score_optimizer" in state_dict:
-        set_optimizer_state_dict(fake_score, fake_score_optimizer, state_dict["fake_score_optimizer"], options=_LOAD_OPTIONS)
-    if generator_scheduler is not None and "generator_scheduler" in state_dict:
+    if fake_score_optimizer is not None:
+        with lora_adapter_context(
+            fake_score,
+            adapter_name=dmd_fake_score_adapter_name(cfg) if cfg is not None and dmd_uses_lora(cfg) else None,
+        ):
+            set_optimizer_state_dict(fake_score, fake_score_optimizer, state_dict["fake_score_optimizer"], options=_LOAD_OPTIONS)
+    if generator_scheduler is not None:
         generator_scheduler.load_state_dict(state_dict["generator_scheduler"])
-    if fake_score_scheduler is not None and "fake_score_scheduler" in state_dict:
+    if fake_score_scheduler is not None:
         fake_score_scheduler.load_state_dict(state_dict["fake_score_scheduler"])
 
-    dataloader_path = path / "dataloader"
-    if dataloader is not None and dataloader_path.exists():
-        global_rank = dist.get_rank() if dist.is_initialized() else 0
-        step = state_dict.get("step", 0)
-        dataloader_rank_path = dataloader_path / f"dataloader_step{step}_rank{global_rank}.pth"
-        if dataloader_rank_path.exists():
-            dataloader_state = torch.load(dataloader_rank_path, map_location="cpu", weights_only=False)
-            dataloader.load_state_dict(dataloader_state["dataloader"])
+    if dataloader is not None:
+        load_dataloader_state(dataloader, checkpoint_path, state_dict.get("step", 0))
 
-    return state_dict.get("step", 0), state_dict.get("epoch", 0)
+    return state_dict.get("step", 0)
 
 
 def _reduce_log_tensor(value: torch.Tensor | float | int, device: torch.device) -> float:
@@ -1698,7 +1546,7 @@ def main(cfg: ExpConfig):
     pipeline = load_pipeline(cfg, generator_model, device)
 
     controller = ResilientDMDController(cfg, device)
-    init_step, epoch = 0, 0
+    init_step = 0
     if cfg.auto_resume:
         latest_ckpt_dir = find_latest_checkpoint(ckpt_dir)
         if latest_ckpt_dir is not None:
@@ -1711,11 +1559,10 @@ def main(cfg: ExpConfig):
 
     if cfg.resume_from_checkpoint is not None:
         logger.info(f"Resuming DMD checkpoint from: {cfg.resume_from_checkpoint}")
-        init_step, epoch = load_dmd_checkpoint(
+        init_step = load_dmd_checkpoint(
             generator_model,
             fake_score,
             cfg.resume_from_checkpoint,
-            device,
             cfg=cfg,
             generator_optimizer=generator_optimizer if cfg.resume_optimizer else None,
             fake_score_optimizer=fake_score_optimizer if cfg.resume_optimizer else None,
@@ -1798,14 +1645,13 @@ def main(cfg: ExpConfig):
                     generator=noise_generator_cuda,
                     ref_image_pixels=batch.get("ref_image_pixel"),
                 )
-                target_latents, _ = _flatten_multi_item_latents(latents, additional_inputs)
+                target_latents = latents[:, -1]
                 negative_prompt_embeds, negative_prompt_embeds_mask = encode_negative_prompt(
                     cfg,
                     pipeline,
                     batch_size=target_latents.shape[0],
                     task_type=additional_inputs["task_type"],
                     pixel_values=batch["pixel"],
-                    ref_image_pixels=batch.get("ref_image_pixel"),
                 )
                 last_preprocess_time = time.perf_counter() - preprocess_start_time
                 preprocess_times.append(last_preprocess_time)
@@ -1916,7 +1762,7 @@ def main(cfg: ExpConfig):
                 generator=noise_generator_cuda,
                 ref_image_pixels=batch.get("ref_image_pixel"),
             )
-            target_latents, _ = _flatten_multi_item_latents(latents, additional_inputs)
+            target_latents = latents[:, -1]
             last_preprocess_time = time.perf_counter() - preprocess_start_time
             preprocess_times.append(last_preprocess_time)
 
@@ -2054,7 +1900,6 @@ def main(cfg: ExpConfig):
                 step,
                 global_rank,
                 cfg=cfg,
-                epoch=epoch,
                 generator_optimizer=generator_optimizer,
                 fake_score_optimizer=fake_score_optimizer,
                 generator_scheduler=generator_lr_scheduler,
