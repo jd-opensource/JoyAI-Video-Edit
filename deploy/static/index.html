@@ -2148,6 +2148,7 @@ function syncRefThumb() {
   syncPeAvailability();
 }
 
+let peDefaultsApplied = false;
 function syncPeAvailability() {
   const usePeEl = document.getElementById("usePe");
   const peAvailable = !(SERVER_DEFAULTS && SERVER_DEFAULTS.pe_available === false);
@@ -2155,6 +2156,10 @@ function syncPeAvailability() {
   if (usePeEl) {
     usePeEl.disabled = locked;
     if (!peAvailable) usePeEl.checked = false;
+    else if (!peDefaultsApplied && SERVER_DEFAULTS) {
+      usePeEl.checked = SERVER_DEFAULTS.use_pe !== false;
+      peDefaultsApplied = true;
+    }
   }
   if (peToggleEl) {
     peToggleEl.setAttribute("aria-disabled", locked ? "true" : "false");
@@ -2716,7 +2721,6 @@ function applyServerDefaults() {
   }
   const boolMap = {
     freezeKvOnStatic: "freeze_kv_on_static",
-    usePe: "use_pe",
     profileTimings: "profile_timings",
   };
   for (const [id, key] of Object.entries(boolMap)) {

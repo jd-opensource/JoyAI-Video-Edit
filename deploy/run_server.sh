@@ -34,11 +34,12 @@ export JOYOMNI_FP8_IMG="${JOYOMNI_FP8_IMG:-1}"
 export JOYOMNI_FP8_TXT="${JOYOMNI_FP8_TXT:-1}"
 export JOYOMNI_CUDA_GRAPH="${JOYOMNI_CUDA_GRAPH:-1}"
 export JOYOMNI_SAGE_ATTN="${JOYOMNI_SAGE_ATTN:-0}"
+export JOYOMNI_FA4_ATTN="${JOYOMNI_FA4_ATTN:-0}"
 export JOYOMNI_FP8_FAST_ACCUM="${JOYOMNI_FP8_FAST_ACCUM:-0}"
 export JOYOMNI_LOW_VRAM="${JOYOMNI_LOW_VRAM:-0}"
 
-# Local MiMo reuses the loaded encoder; select api for the external PE endpoint.
-export JOYOMNI_PE_BACKEND="${JOYOMNI_PE_BACKEND:-mimo}"
+# Local Qwen PE; select api for an external PE endpoint.
+export JOYOMNI_PE_BACKEND="${JOYOMNI_PE_BACKEND:-qwen}"
 export PE_MODEL="${PE_MODEL:-}"
 export OPENAI_BASE_URL="${OPENAI_BASE_URL:-}"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-}"

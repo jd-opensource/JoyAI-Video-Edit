@@ -128,89 +128,76 @@ restoring their old appearance. If the background is unaffected, briefly state t
 unchanged; otherwise preserve only its unaffected attributes.
 """
 
-RV2V_SYSTEM_PROMPT = """You write precise English instructions for reference-image-guided video
-editing (RV2V). Understand the source video and the separate reference image, then describe only
-the requested transfer. The source video determines the subject, pose, motion, framing and scene;
-the reference supplies only the visual attributes requested by the user."""
+RV2V_SYSTEM_PROMPT = """Write precise English instructions for reference-image-guided video editing.
+The source supplies motion, framing and scene; the reference supplies only requested attributes.
+Explicit user instructions override these defaults."""
 
 RV2V_TEMPLATE = """# INPUT
 User request: {user_prompt}
-Image 0 is the REFERENCE IMAGE: the donor of the requested appearance, garment, object or scene.
-Any subsequent images are SOURCE VIDEO FRAMES: the video to edit.
+Image 0 is the REFERENCE IMAGE; subsequent images are SOURCE VIDEO FRAMES.
 
-# OUTPUT
-Return ONLY one cohesive English editing prompt, about 80-140 words. No explanation or labels.
-Start with a direct edit instruction, naming the target in the video and the requested item from
-the reference image. Refer to it as "the reference image", never by image number in the output.
-Inspect the reference and describe 3-5 distinctive visible features relevant to the request:
-color, shape, material, pattern and construction. Be concrete and accurate; do not invent details.
-Keep the entire request, including any explicit exceptions, extra edits and exact quoted text.
+# OUTPUT AND SCOPE
+Return only one cohesive English editing prompt, concise for simple requests. Start with the
+requested edit; say "the reference image", never image numbers. Describe only useful, clearly
+visible reference features. Preserve every requested edit, exclusion, strength and timing;
+these override all defaults. Attribute-only edits change only that attribute.
+Do not import unrelated reference identity, physique, pose, framing, lighting, background or props.
+Express exclusions as properties of the requested result; give removal instructions only for
+visible source objects. Do not invent hidden anatomy, occluded details or objects to remove.
 
-# TRANSFER SCOPE
-Explicit requested edits and exceptions override the default preservation rules below. Determine
-all requested changes first; preserve only attributes outside that combined edit scope.
-- Clothes: identify the visible source clothing layers and the requested replacement scope before
-  choosing what to preserve. A request explicitly targeting an inner top, outer garment or trousers
-  changes only that layer; a complete outfit transfers the visible outfit. For an unqualified
-  request to replace the top/upper-body clothing, make the reference top the visible upper-body
-  garment: replace existing layers that would cover or conceal it, including outerwear or
-  shoulder-draped coverings, unless the user explicitly keeps them. Do not classify these clothing
-  layers as accessories to preserve. Top-only edits keep lower-body clothing, and trousers-only
-  edits keep upper-body clothing. Name the source garments/layers being replaced in the final
-  prompt, then describe the reference garment's cut, silhouette, length, color and visible details.
-  Preserve the source person's identity, face, hair, body proportions and pose within the unchanged
-  scope.
-  The reference model's face, body, pose and background are not part of a clothing transfer.
-  For requested or reference flared trousers, prioritize a fitted knee and seams widening
-  below it to loose hems wider than the knee; keep a slight flare modest. Trouser-only edits
-  retain the source waistband height and the original top hem, drape and overlap.
-  For requested/reference full-length sleeves, prioritize continuous fabric from shoulders
-  across elbows and forearms to cuffs touching the hand bases, replacing the source sleeve
-  silhouette. Omit the source sleeve length; describe only construction inside the source crop.
-  Fit transferred garments naturally to the source anatomy, using one concise slender-tailoring
-  clause within the requested/reference cut, including loose styles. Attribute-only edits retain cut.
-  For qipao replacement, default to one continuous opaque skirt wrapping both legs to the hem,
-  with joined panels deforming together. Describe the reference's collar and dress construction
-  instead of qipao/cheongsam or slit/opening terms. Explicit cut or exact-copy requests override.
-  Retain other reference details, natural overlap/contact and the source crop; omit offscreen parts.
-- Clothing/footwear color: follow the reference unless explicitly recoloring; describe its actual
-  color rather than echoing an ambiguous user color label. For default apricot recoloring, use only
-  "warm off-white" (near white) throughout the final prompt, never "apricot" or beige/tan/brown.
-  Explicit fruit/orange hues and exact color codes override; keep other items in their own colors.
-- Background: replace the original environment with the environment in the reference, describing
-  its main visible structures. Keep the source foreground person and their clothing. Remove old
-  background furniture only when it is actually visible. Do not add people from the reference.
-- Person/character replacement: describe the reference face/head AND the requested body/outfit.
-  Preserve source pose and motion, without preserving identity attributes that must change.
-- Object/accessory: transfer only the requested object, at its functional position and scale.
-- Style: apply only the requested visual style from the reference to the specified content.
+# EDIT TYPES
+- Clothes: name relevant visible layers being replaced. Change only the targeted layer; for an
+  unqualified top replacement, also replace layers concealing it, including outerwear and
+  shoulder-draped coverings, unless explicitly retained. These are clothing, not accessories.
+  Keep untargeted garments, accessories, source identity and body proportions. Replace targeted
+  garments with the reference design: cut, color, material and pattern, without blending in the
+  source garment's details. Fit it to source anatomy without changing its silhouette, including
+  loose styles. Trouser-only edits retain waistband height and the top's hem, drape and overlap.
+  Match sleeve length and degree of trouser flare through garment construction, not extra
+  layers; full sleeves reach the hand bases. For qipao/cheongsam, retain reference collar,
+  fastenings, fabric and cut, with connected panels. Keep visible reference slits, defaulting
+  their upper endpoints to near knee level unless another height or an exact reference cut is
+  explicitly requested. During motion, keep endpoints fixed on the garment and panels
+  overlapping above them. A slit is a side opening, not a raised hem. For clothing/footwear
+  color, use the reference color unless recoloring. For unspecified apricot recoloring, write
+  only "warm off-white", never "apricot"; explicit orange/fruit hues, precise shades or color
+  codes override. Other items retain their colors.
 
-Close with a concise preservation clause for what stays unchanged. Keep the original background
-unless the user requests changing it. Do not copy reference framing, pose, lighting, typography,
-logos, watermarks, props or other garments unless requested. Do not describe invisible body parts
-or force the camera to reveal the whole garment. Avoid vague quality words and excessive negative
-instructions. The edit is already fully present in the first output frame and follows source
-motion consistently; do not describe a gradual transformation.
+- Face-only replacement (explicit face/head requests): transfer reference identity and hair/head features except
+  explicitly retained attributes. Keep source clothing and body; do not import reference outfits
+  or props. Hair-only edits do not change facial identity.
 
-# SOURCE FRAMING — CLOTHING EDITS
-First identify the source person's actual visible crop and pose. In a seated chest-up or
-head-and-shoulders view, begin the final editing prompt by anchoring the edit to that existing
-close-up and seated pose. Describe only the reference garment surfaces that can appear inside
-this source crop. For a dress, name the visible upper part of the dress and describe its neckline,
-shoulder fabric, sleeves and chest texture. For an outfit, describe only its visible jacket/top
-and inner layer. Completely omit descriptions of offscreen garments, waist/hip shaping, skirt
-length, trouser legs, hemlines, feet and full-body silhouettes from the final prompt, including
-negative mentions of those details. This is a visibility rule, not a change in the user's outfit
-choice. Full-body source shots still receive the full requested outfit. At each output frame,
-match the person's head, shoulder and arm positions, pose, subject scale and framing to the
-corresponding source-video frame; let the clothing follow the source motion with natural
-deformation. Do not freeze the person in the provided frame's pose or suppress source movement.
-Preserve all visible source accessories that fall outside the requested edit scope. Explicitly
-apply any requested accessory removal, replacement or modification; never also describe that
-accessory as unchanged. Retained accessories follow the source body's motion
-and placement, with the new fabric layered naturally around them. State the actual visible crop
-directly; do not output an "if visible" or "if cropped" condition. Never enlarge the visible body
-region to show a garment.
+- Whole-person/character/creature replacement: requests such as "replace me with this man/woman"
+  transfer reference identity, hair and visible outfit together by default, not just the face.
+  Describe both head/face and outfit features. Replace source clothing with the reference outfit;
+  do not retain or blend its design unless explicitly requested. Preserve source pose, motion
+  and body proportions unless edited. A costume change alone does not replace identity.
+
+- Background: transfer the reference environment's main structures. Replace visible old background
+  remnants, including gaps around the subject and frame edges. Keep source foreground people and
+  clothing; do not add reference people unless requested.
+
+- Objects/accessories: transfer the requested item at its functional position and appropriate scale.
+
+- Style: apply reference style within the requested scope and strength. Preserve recognizable
+  identity, action and layout without restoring the original rendering in styled regions.
+
+# TEXT
+Render user-specified text verbatim in double quotes, preserving language and spelling even if
+originally unquoted. Do not translate it or copy incidental source/reference text, logos or
+watermarks unless requested. For removal, identify the text's scope without repeating its wording.
+
+# VIDEO AND PRESERVATION
+Apply the edit from the first frame unless gradual or timed changes are requested. Follow each
+source frame's pose, shoulder contour, arm positions, scale and motion; never freeze the anchor
+pose or copy the reference stance. Maintain tracking, occlusion, garment deformation and natural
+layering/contact around retained accessories, with appropriate shadows and reflections.
+Respect source framing; never zoom out to show an edit. A complete outfit applies as its parts
+become visible later. Retain explicitly requested details, but elaborate only currently visible,
+image-supported features; do not invent offscreen anatomy or garment details.
+End with a brief preservation clause for unaffected attributes, including the background when
+unedited. Never preserve or restore source appearances replaced, covered or transformed by any
+requested edit.
 """
 
 
@@ -386,53 +373,21 @@ class PromptEnhancer:
             return user_prompt
 
 
-MIMO_PERSON_SYSTEM_PROMPT = """You write concise English captions for reference-guided person replacement in a video.
-Image 0 is the reference person. Image 1 is a frame of the source video to edit.
-Return ONLY one direct editing sentence, about 20-40 words, in this format:
-Replace [brief identification of the source person] with the person from image0, featuring [2-3 distinctive visible reference features].
-Use reference hair, clothing and accessories to identify the requested appearance. Do not invent details.
-Preserve every explicitly requested exception or extra edit. Do not add edits, framing changes, reference pose, or reference body proportions. Do not describe background or lighting unless the user requests changing them.
-The source video supplies pose, motion and shoulder silhouette; this is an editing instruction, not a new scene description.
-No explanation, reasoning, markdown, labels, or generic quality/preservation paragraph."""
-
-MIMO_MODEL = "MiMo-VL-7B-RL-2508"
+QWEN_MODEL = "Qwen3.5-35B-A3B-GPTQ-Int4"
 
 
 def pe_available(backend):
-    return backend == "mimo" or bool(os.environ.get("OPENAI_API_KEY"))
+    return backend == "qwen" or bool(os.environ.get("OPENAI_API_KEY"))
 
 
 def pe_model_name(backend, model=None):
-    return MIMO_MODEL if backend == "mimo" else model or os.environ.get("PE_MODEL") or DEFAULT_MODEL
+    return QWEN_MODEL if backend == "qwen" else model or os.environ.get("PE_MODEL") or DEFAULT_MODEL
 
 
-def _person_replacement(prompt):
-    """Use the short template only for an explicit whole-person replacement."""
-    text = prompt.lower()
-    if re.search(r"(?:不要|别|勿|do not|don't|never)[^，。,.!;\n]*(?:换人|替换|换成|replace|swap)", text):
-        return False
-    scopes = re.findall(r"\b(?:replace|swap)\s+(.+?)\s+(?:with|by|for)\s+", text)
-    scopes += re.findall(r"([^，。！？;\n]+?)(?:替换成|替换为|换成|变成)", text)
-    for scope in scopes:
-        if re.search(r"衣|服|裤|裙|帽|眼镜|头发|发型|脸|背景|颜色|\b(?:clothes|clothing|outfit|shirt|top|dress|jacket|pants|trousers|hat|hair|face|background|color)\b", scope):
-            continue
-        if re.search(r"人物|主角|男人|女人|男孩|女孩|人|我|\b(?:person|people|man|woman|girl|boy|subject|character|actor|individual|me)\b", scope):
-            return True
-    return text.strip() in {"换人", "替换人物", "person replacement", "swap person"}
+class QwenPromptEnhancer:
+    """Use the Qwen model prepared once with the video runtime."""
 
-
-def _mimo_prompt(task_type, user_prompt):
-    if task_type == "rv2v":
-        if _person_replacement(user_prompt):
-            return MIMO_PERSON_SYSTEM_PROMPT, "User request: " + user_prompt, "person_short", 128
-        return RV2V_SYSTEM_PROMPT, RV2V_TEMPLATE.format(user_prompt=user_prompt), "rv2v", 384
-    return SYSTEM_PROMPT, V2V_TEMPLATE.format(user_prompt=user_prompt), "v2v", 384
-
-
-class MimoPromptEnhancer:
-    """Use the runtime's existing generator; never load a second set of weights."""
-
-    model = MIMO_MODEL
+    model = QWEN_MODEL
 
     def __init__(self, pipeline, lock):
         if pipeline is None or lock is None:
@@ -443,12 +398,6 @@ class MimoPromptEnhancer:
 
     def _generate(self, task_type, user_prompt, video, ref_image, stop, deadline):
         import time
-        import torch
-        from transformers import StoppingCriteria, StoppingCriteriaList
-
-        class Stop(StoppingCriteria):
-            def __call__(self, input_ids, scores, **kwargs):
-                return stop.is_set() or time.monotonic() >= deadline
 
         def image(item):
             if isinstance(item, tuple):
@@ -466,52 +415,28 @@ class MimoPromptEnhancer:
             if ref_image is None:
                 raise ValueError("Reference editing PE requires a reference image")
             images.insert(0, image(ref_image))
-        system, text, self.template, max_tokens = _mimo_prompt(task_type, user_prompt)
-        content = [{"type": "text", "text": text}]
-        for i in range(len(images)):
-            content.extend([{"type": "text", "text": f"\n[Image {i}]:"}, {"type": "image"}])
-        messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
+        self.template = task_type
+        if task_type == "rv2v":
+            system, text = RV2V_SYSTEM_PROMPT, RV2V_TEMPLATE.format(user_prompt=user_prompt)
+        else:
+            system, text = SYSTEM_PROMPT, V2V_TEMPLATE.format(user_prompt=user_prompt)
         if not self.lock.acquire(timeout=max(0, deadline - time.monotonic())):
-            raise TimeoutError("Local PE timed out waiting for the encoder")
+            raise TimeoutError("Local PE timed out waiting for inference")
         try:
             if stop.is_set() or time.monotonic() >= deadline:
                 raise TimeoutError("Local PE cancelled before generation")
-            model, processor = self.pipeline.text_encoder, self.pipeline.qwen_processor
-            device = self.pipeline._execution_device
-            rendered = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            rendered += "<think>\n\n</think>\n\n"
-            inputs = processor(text=[rendered], images=images or None, padding=True,
-                               return_tensors="pt").to(device)
-            rope_owner = getattr(model, "model", model)
-            has_rope = hasattr(rope_owner, "rope_deltas")
-            old_rope = getattr(rope_owner, "rope_deltas", None)
-            try:
-                from xvideo.serving.pe_aoti import generate_mimo_aoti
-                with torch.inference_mode():
-                    tokens = generate_mimo_aoti(
-                        model, inputs, max_tokens,
-                        lambda: stop.is_set() or time.monotonic() >= deadline,
-                    )
-                    self.decoder = "aoti" if tokens is not None else "eager"
-                    if tokens is None:
-                        output = model.generate(
-                            **inputs, max_new_tokens=max_tokens, do_sample=False, use_cache=True,
-                            disable_compile=True,
-                            stopping_criteria=StoppingCriteriaList([Stop()]),
-                        )
-                        tokens = output[0, inputs.input_ids.shape[1]:].cpu()
-            finally:
-                if has_rope:
-                    rope_owner.rope_deltas = old_rope
+            runtime = getattr(self.pipeline, "_pe_qwen", None)
+            if runtime is None:
+                raise RuntimeError("Qwen PE was not prepared at startup")
+            text, timings = runtime.generate(
+                system, text, images, lambda: stop.is_set() or time.monotonic() >= deadline,
+            )
+            self.decoder = "cuda_graph"
+            self.timings = timings
+            logger.info("Qwen PE %s: prefill %.3fs, graph capture %.3fs",
+                        task_type, timings["prefill_seconds"], timings["capture_seconds"])
             if stop.is_set() or time.monotonic() >= deadline:
                 raise TimeoutError("Local PE exceeded its generation deadline")
-            eos = model.generation_config.eos_token_id
-            eos = [eos] if isinstance(eos, int) else (eos or [])
-            if tokens.numel() >= max_tokens and int(tokens[-1]) not in eos:
-                raise ValueError("Local PE output was truncated")
-            text = processor.tokenizer.decode(tokens, skip_special_tokens=True).strip()
-            if not text or "<think" in text.lower() or "</think" in text.lower():
-                raise ValueError("Local PE returned reasoning instead of an editing prompt")
             return _sanitize_enhanced(text, user_prompt)
         finally:
             self.lock.release()
@@ -531,7 +456,7 @@ class MimoPromptEnhancer:
         except (asyncio.TimeoutError, asyncio.CancelledError):
             stop.set()
             # CUDA work cannot be killed mid-kernel. Drain before handing this
-            # same encoder back to video generation or another session.
+            # inference lock back to video generation or another session.
             try:
                 await asyncio.shield(worker)
             except Exception:

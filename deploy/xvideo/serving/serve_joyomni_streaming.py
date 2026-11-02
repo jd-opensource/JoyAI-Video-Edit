@@ -466,9 +466,9 @@ async def _enhance_prompt(
     error = None
     model = pe_model_name(backend, pe_model)
     try:
-        from xvideo.serving.pe import MimoPromptEnhancer, PromptEnhancer
+        from xvideo.serving.pe import QwenPromptEnhancer, PromptEnhancer
 
-        enhancer = (MimoPromptEnhancer(pipeline, inference_lock) if backend == "mimo"
+        enhancer = (QwenPromptEnhancer(pipeline, inference_lock) if backend == "qwen"
                     else PromptEnhancer(model=pe_model))
         model = enhancer.model or model
         enhanced = await enhancer.enhance(
@@ -495,9 +495,10 @@ async def _enhance_prompt(
     }
     if error is not None:
         report["error"] = error
-    elif backend == "mimo":
+    elif backend == "qwen":
         report["template"] = enhancer.template
         report["decoder"] = getattr(enhancer, "decoder", "eager")
+        report["timings"] = enhancer.timings
     return report
 
 class _SegmentedRecorder:
@@ -704,7 +705,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         with app.state.runtime_lock:
             if app.state.runtime is None:
                 _preload_gate_detectors(args)
-                app.state.runtime = JoyOmniRuntime.load(
+                runtime = JoyOmniRuntime.load(
                     args.dit_ckpt,
                     vae_ckpt=args.vae_ckpt,
                     text_encoder_ckpt=args.text_encoder_ckpt,
@@ -718,13 +719,18 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     warmup_height=args.height,
                     warmup_width=args.width,
                 )
+                if args.pe_backend == "qwen":
+                    from xvideo.serving.pe_qwen import MODEL_ID, MODEL_REVISION, QwenRuntime
+                    pe_path = args.pe_ckpt
+                    if not pe_path:
+                        from huggingface_hub import snapshot_download
+                        pe_path = snapshot_download(MODEL_ID, revision=MODEL_REVISION)
+                    runtime.pipeline._pe_qwen = QwenRuntime(pe_path, device=args.device)
+                app.state.runtime = runtime
         return app.state.runtime
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        if args.pe_backend == "mimo":
-            from xvideo.serving.pe_aoti import prepare_mimo_aoti
-            prepare_mimo_aoti()
         if args.preload:
             get_runtime()
         yield
@@ -1571,7 +1577,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         pe_defer = False
                         if use_pe:
                             # A cached close-up PE must not bypass the new full-body anchor.
-                            cached_enhanced_prompt = "" if (full_body_detection or args.pe_backend == "mimo") else str(payload.get("enhanced_prompt") or "").strip()
+                            cached_enhanced_prompt = "" if (full_body_detection or args.pe_backend == "qwen") else str(payload.get("enhanced_prompt") or "").strip()
                             if cached_enhanced_prompt:
                                 session_prompt = cached_enhanced_prompt
                                 pe_report = {
@@ -2155,8 +2161,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-inference-steps", type=int, default=2)
     parser.add_argument("--fps", type=int, default=24, help="Client send/playback target fps; seeds the #fps UI control and paces the live camera. Recording follows each frame's t_capture_ms (media time for mp4 uploads, capture wall-clock for the live camera), so this does not set the recorded file's duration.")
     parser.add_argument("--use-pe", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--pe-backend", choices=("mimo", "api"),
-                        default=os.environ.get("JOYOMNI_PE_BACKEND", "mimo"))
+    parser.add_argument("--pe-backend", choices=("qwen", "api"),
+                        default=os.environ.get("JOYOMNI_PE_BACKEND", "qwen"))
+    parser.add_argument("--pe-ckpt", default=os.environ.get("JOYOMNI_PE_CKPT"),
+                        help="Local Qwen PE checkpoint directory; otherwise use the pinned Hub model.")
     parser.add_argument("--pe-model", type=str, default=None)
     parser.add_argument("--pe-timeout-s", type=float, default=20.0, help="Hard wall-clock cap for deferred prompt-enhancement. On timeout the session degrades to the RAW prompt and starts editing, so a slow/hung PE endpoint (bad network / provider stall) can never wedge the client in the prompt-enhancement state.")
 

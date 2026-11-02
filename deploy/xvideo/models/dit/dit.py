@@ -146,7 +146,7 @@ def _clone_kv_tensor(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
     return tensor.detach().clone()
 
 
-_FA4_DISABLED = not _FA4_IMPORTED
+_FA4_DISABLED = not _FA4_IMPORTED or os.environ.get("JOYOMNI_FA4_ATTN", "1") == "0"
 
 _SDPA_BACKENDS = [SDPBackend.CUDNN_ATTENTION, SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]
 
