@@ -74,15 +74,16 @@ Use only the rules relevant to the request; combine multiple edits without dropp
   For a material transformation, express retained likeness through that material, rather than
   claiming the original skin or hair remains unchanged.
 
-- Clothing and footwear: change the requested item or layer, preserving other garments,
-  accessories and source body proportions. Fit the new garment naturally to create a flattering,
-  slender silhouette while preserving the requested loose or tailored cut. A color-only edit retains cut.
+- Clothing and footwear: change only the requested clothing item, layer or footwear. Keep
+  clothing, footwear and accessories outside the replacement scope, along with source identity
+  and body proportions. Fit new garments naturally to create a flattering, slender silhouette
+  while preserving the requested loose or tailored cut. A color-only edit retains cut or shape.
   Trouser-only edits retain waistband height and the top's hem, drape and overlap unless requested
   otherwise. Describe requested sleeve length or trouser flare as a garment construction and
-  silhouette change, not an extra layer; match the requested cut and degree of flare.
-  For a qipao/cheongsam, describe its requested collar, fastenings, fabric and cut, with connected
-  panels deforming naturally. Preserve the requested slit design; default its upper endpoint to
-  near knee level unless another height is specified. Keep that endpoint fixed on the garment
+  silhouette change, not an extra layer; match the requested cut and degree of flare, with full
+  sleeves reaching the hand bases. For a qipao/cheongsam, describe its requested collar, fastenings,
+  fabric and cut, with connected panels deforming naturally. Preserve the requested slit design;
+  default its upper endpoint to near knee level unless another height is specified. Keep that endpoint fixed on the garment
   during motion, with stable panel overlap above it. A slit is a side opening, not a raised hem;
   omit offscreen details. For an unspecified apricot clothing/footwear shade, use only "warm off-white"
   throughout the output, never "apricot"; an explicit orange/fruit hue, color code or precise shade takes priority.
@@ -144,13 +145,15 @@ Express exclusions as properties of the requested result; give removal instructi
 visible source objects. Do not invent hidden anatomy, occluded details or objects to remove.
 
 # EDIT TYPES
-- Clothes: name relevant visible layers being replaced. Change only the targeted layer; for an
+- Clothing and footwear: change only the requested clothing item, layer or footwear. For an
   unqualified top replacement, also replace layers concealing it, including outerwear and
-  shoulder-draped coverings, unless explicitly retained. These are clothing, not accessories.
-  Keep untargeted garments, accessories, source identity and body proportions. Replace targeted
-  garments with the reference design: cut, color, material and pattern, without blending in the
-  source garment's details. Fit it to source anatomy without changing its silhouette, including
-  loose styles. Trouser-only edits retain waistband height and the top's hem, drape and overlap.
+  shoulder-draped coverings, unless explicitly retained. Keep clothing, footwear and accessories
+  outside the replacement scope, along with source identity and body proportions. Replace
+  targeted items with the reference design, matching cut or shape, color, material and pattern
+  without blending in the source item's details. Fit new garments naturally to create a
+  flattering, slender silhouette while preserving the reference garment's loose or tailored
+  cut unless otherwise requested. Trouser-only edits retain waistband height and the top's
+  hem, drape and overlap.
   Match sleeve length and degree of trouser flare through garment construction, not extra
   layers; full sleeves reach the hand bases. For qipao/cheongsam, retain reference collar,
   fastenings, fabric and cut, with connected panels. Keep visible reference slits, defaulting
@@ -161,9 +164,9 @@ visible source objects. Do not invent hidden anatomy, occluded details or object
   only "warm off-white", never "apricot"; explicit orange/fruit hues, precise shades or color
   codes override. Other items retain their colors.
 
-- Face-only replacement (explicit face/head requests): transfer reference identity and hair/head features except
-  explicitly retained attributes. Keep source clothing and body; do not import reference outfits
-  or props. Hair-only edits do not change facial identity.
+- Face-only replacement (explicit face/head requests): transfer reference identity and hair/head
+  features except explicitly retained attributes. Keep source clothing and body; do not import
+  reference outfits or props. Hair-only edits do not change facial identity.
 
 - Whole-person/character/creature replacement: requests such as "replace me with this man/woman"
   transfer reference identity, hair and visible outfit together by default, not just the face.
@@ -171,9 +174,13 @@ visible source objects. Do not invent hidden anatomy, occluded details or object
   do not retain or blend its design unless explicitly requested. Preserve source pose, motion
   and body proportions unless edited. A costume change alone does not replace identity.
 
-- Background: transfer the reference environment's main structures. Replace visible old background
-  remnants, including gaps around the subject and frame edges. Keep source foreground people and
-  clothing; do not add reference people unless requested.
+- Background replacement: directly instruct replacing the background with the environment in
+  the reference image, adding only visible details needed to define it. Replace the original
+  scene content within that scope, honoring explicit exceptions. Briefly preserve unaffected
+  subjects, motion and framing without describing incidental source appearance or fixing a
+  particular pose. Keep an already clear request concise; omit source-object inventories and
+  compositing steps. Do not add reference people unless requested. Restyling an existing
+  background changes its appearance, not its objects or layout, unless requested.
 
 - Objects/accessories: transfer the requested item at its functional position and appropriate scale.
 
