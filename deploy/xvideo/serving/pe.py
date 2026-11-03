@@ -46,10 +46,9 @@ The user's explicit edits, exclusions and requested strength override every defa
 Identify the combined edit scope before deciding what to preserve. Keep attributes outside that
 scope; never preserve an attribute that another requested edit changes.
 Use the source frames to identify visible targets, clothing layers, scene layout and framing.
-Do not invent source objects, hidden anatomy or occluded details, including in removal instructions.
-Newly requested objects, appearances and environments may differ from the source; describe only
-details needed to define the requested result. A broad request is not permission to add unrelated
-objects or edits.
+Do not invent source objects, hidden anatomy or occluded details. Newly requested objects,
+appearances and environments may differ from the source; describe only details needed to define
+the requested result. A broad request is not permission to add unrelated objects or edits.
 Keep source action, timing, camera, framing, visual medium and lighting unless the request changes
 them. Adjust only local contact, shadows or reflections needed to integrate the edit naturally.
 
@@ -76,8 +75,8 @@ Use only the rules relevant to the request; combine multiple edits without dropp
   claiming the original skin or hair remains unchanged.
 
 - Clothing and footwear: change the requested item or layer, preserving other garments,
-  accessories and source body proportions. Fit the new garment naturally without imposing a
-  slender silhouette or changing the requested loose/tailored cut. A color-only edit retains cut.
+  accessories and source body proportions. Fit the new garment naturally to create a flattering,
+  slender silhouette while preserving the requested loose or tailored cut. A color-only edit retains cut.
   Trouser-only edits retain waistband height and the top's hem, drape and overlap unless requested
   otherwise. Describe requested sleeve length or trouser flare as a garment construction and
   silhouette change, not an extra layer; match the requested cut and degree of flare.
@@ -85,16 +84,15 @@ Use only the rules relevant to the request; combine multiple edits without dropp
   panels deforming naturally. Preserve the requested slit design; default its upper endpoint to
   near knee level unless another height is specified. Keep that endpoint fixed on the garment
   during motion, with stable panel overlap above it. A slit is a side opening, not a raised hem;
-  omit offscreen details.
-  For an unspecified apricot clothing/footwear shade, use only "warm off-white" throughout the
-  output, never "apricot"; an explicit orange/fruit hue, color code or precise shade takes priority.
+  omit offscreen details. For an unspecified apricot clothing/footwear shade, use only "warm off-white"
+  throughout the output, never "apricot"; an explicit orange/fruit hue, color code or precise shade takes priority.
 
-- Background replacement: describe the requested new environment and fill the replaced regions,
-  including gaps around the subject and frame edges. Explicitly remove visible old background
-  remnants bordering the subject, such as chair backs or headrests, only when they belong to the
-  replacement scope. Name only visible components; never infer a headrest from a chair back.
-  Retain surviving foreground elements and objects the user explicitly keeps. Restyling an
-  existing background changes its appearance, not its objects or layout, unless also requested.
+- Background replacement: directly instruct replacing the background with the requested scene,
+  adding only details needed to define the new environment. Replace the original scene content
+  within that scope, honoring explicit exceptions. Briefly preserve unaffected subjects, motion
+  and framing without describing incidental source appearance or fixing a particular pose.
+  Keep an already clear request concise; omit source-object inventories and compositing steps.
+  Restyling an existing background changes its appearance, not its objects or layout, unless requested.
 
 - Style, weather, lighting, color grading or focus: apply only the requested effect to the requested
   regions and at the requested strength. A whole-frame style change includes the subject and
