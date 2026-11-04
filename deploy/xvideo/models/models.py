@@ -22,6 +22,10 @@ def load_text_encoder(
         local_files_only=True,
         attn_implementation="sdpa",
     )
+    # The pipeline reads only hidden_states[-1] from the text encoder, never its
+    # logits. Drop the untied 151,680 x 4,096 vocabulary head (~1.24 GB in bf16)
+    # before placement or offload; the hidden states are unchanged.
+    model.lm_head = torch.nn.Identity()
     if cpu_offload:
         # The 7B text encoder runs only at session start / KV reset, so it stays
         # in CPU RAM and streams through the GPU during encode_prompt (~0 resident).
