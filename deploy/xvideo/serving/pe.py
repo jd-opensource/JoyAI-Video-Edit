@@ -384,10 +384,12 @@ QWEN_MODEL = "Qwen3.5-35B-A3B-GPTQ-Int4"
 
 
 def pe_available(backend):
-    return backend == "qwen" or bool(os.environ.get("OPENAI_API_KEY"))
+    return backend == "qwen" or (backend == "api" and bool(os.environ.get("OPENAI_API_KEY")))
 
 
 def pe_model_name(backend, model=None):
+    if backend == "none":
+        return None
     return QWEN_MODEL if backend == "qwen" else model or os.environ.get("PE_MODEL") or DEFAULT_MODEL
 
 

@@ -317,13 +317,14 @@ JOYOMNI_WIDTH=1248 JOYOMNI_HEIGHT=720 JOYOMNI_FPS=16 \
 bash deploy/run_server.sh
 ```
 
-**RTX 5090 — 480p @ 24 FPS:**
+**RTX 5090 — 480p @ 24 FPS (PE disabled):**
 
 ```bash
 JOYOMNI_CONDA_SH=/path/to/conda/etc/profile.d/conda.sh \
 JOYOMNI_CONDA_ENV=joyai-video-edit \
 JOYOMNI_CACHE_ROOT=$PWD/deploy/deps/cache_rtx5090 \
 JOYOMNI_FA4_ATTN=0 JOYOMNI_SAGE_ATTN=1 JOYOMNI_FP8_FAST_ACCUM=1 JOYOMNI_LOW_VRAM=1 \
+JOYOMNI_PE_BACKEND=none \
 bash deploy/run_server.sh
 ```
 
@@ -345,6 +346,6 @@ Key variables:
 | `JOYOMNI_CKPT_ROOT` | override the checkpoints dir (default `deploy/deps/checkpoints`). |
 | `JOYOMNI_DIT_CKPT` / `JOYOMNI_VAE_CKPT` / `JOYOMNI_TEXT_ENCODER_CKPT` / `JOYOMNI_FACE_ONNX` / `JOYOMNI_PERSON_ONNX` | override individual weight paths (default: derived from `JOYOMNI_CKPT_ROOT`). |
 | `JOYOMNI_RECORD_DIR` | recording output dir. |
-| `JOYOMNI_PE_BACKEND` | `qwen` (default): local Qwen INT4 PE. `api`: external prompt-enhancement endpoint. |
+| `JOYOMNI_PE_BACKEND` | `qwen` (default): local Qwen INT4 PE. `api`: external prompt-enhancement endpoint. `none`: disable PE without loading Qwen. |
 | `JOYOMNI_PE_CKPT` | Local Qwen directory (default `JOYOMNI_CKPT_ROOT/Qwen3.5-35B-A3B-GPTQ-Int4`). |
 | `PE_MODEL` / `OPENAI_BASE_URL` / `OPENAI_API_KEY` | Used with `JOYOMNI_PE_BACKEND=api`. Prompt-enhancement endpoint: OpenAI-compatible, or Anthropic-protocol when the base URL contains `/anthropic` (key sent as `Authorization: Bearer`). If unset, the server falls back to the raw user prompt. |

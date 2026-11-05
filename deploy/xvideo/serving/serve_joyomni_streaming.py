@@ -344,9 +344,7 @@ def _default_detection_mode(args):
         return "full"
     if args.face_detection is False:
         return "off"
-    if args.face_detection is True:
-        return "near"
-    return "near" if args.online_gate else "off"
+    return "near"
 
 
 def _resolve_detection_mode(payload, args, *, file_input):
@@ -762,7 +760,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             "static_diff_thresh": args.static_diff_thresh,
             "freeze_kv_on_static": args.freeze_kv_on_static,
             "profile_timings": args.profile_timings,
-            "use_pe": args.use_pe,
+            "use_pe": args.use_pe and pe_available(args.pe_backend),
             "pe_available": pe_available(args.pe_backend),
             "max_temporal_ids": args.max_temporal_ids,
             "record_enabled": args.record_dir is not None,
@@ -804,7 +802,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     if app.state.runtime is not None
                     else (args.postprocess_device or args.vae_pseudo_device or args.vae_decode_device or args.vae_device)
                 ),
-                "use_pe": args.use_pe,
+                "use_pe": args.use_pe and pe_available(args.pe_backend),
                 "detection_mode": _default_detection_mode(args),
                 "pe_model": pe_model_name(args.pe_backend, args.pe_model),
                 "kv_reset_frames": args.kv_reset_frames,
@@ -1536,7 +1534,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         flow["base"] = frames_out
                         flow.update(has_ack=False, dropped=0, skew_min=None, skew_at=0.0, up_ms=0.0)
 
-                        gate_on = entry_gate and bool(args.online_gate)
+                        gate_on = entry_gate
                         ws_debug["live_detection"] = gate_on
 
                         fg_score = float(payload.get("fg_score", args.face_gate_score))
@@ -1576,26 +1574,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         if face_gate_pending:
                             print(f"#####[FACE-GATE] armed (score={fg_score}, min_below={fg_min_below}, stable={fg_stable}, absent={fg_absent})", flush=True)
                         pe_report = None
-                        pe_defer = False
-                        if use_pe:
-                            # A cached close-up PE must not bypass the new full-body anchor.
-                            cached_enhanced_prompt = "" if (full_body_detection or args.pe_backend == "qwen") else str(payload.get("enhanced_prompt") or "").strip()
-                            if cached_enhanced_prompt:
-                                session_prompt = cached_enhanced_prompt
-                                pe_report = {
-                                    "enabled": True,
-                                    "task_type": "rv2v" if ref_image is not None else "v2v",
-                                    "model": pe_model_name(args.pe_backend, args.pe_model),
-                                    "raw_prompt": raw_session_prompt,
-                                    "enhanced_prompt": session_prompt,
-                                    "elapsed_s": 0.0,
-                                    "fallback": session_prompt == raw_session_prompt,
-                                    "cached": True,
-                                }
-                                ws_debug["pe_report"] = pe_report
-                                await _send_json({"type": "prompt_enhanced", **pe_report})
-                            else:
-                                pe_defer = True
+                        pe_defer = use_pe
                         _align = runtime.pipeline.vae.stem.stride * 8
                         _req_h = int(payload.get("height", args.height))
                         _req_w = int(payload.get("width", args.width))
@@ -2163,7 +2142,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-inference-steps", type=int, default=2)
     parser.add_argument("--fps", type=int, default=24, help="Client send/playback target fps; seeds the #fps UI control and paces the live camera. Recording follows each frame's t_capture_ms (media time for mp4 uploads, capture wall-clock for the live camera), so this does not set the recorded file's duration.")
     parser.add_argument("--use-pe", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--pe-backend", choices=("qwen", "api"),
+    parser.add_argument("--pe-backend", choices=("qwen", "api", "none"),
                         default=os.environ.get("JOYOMNI_PE_BACKEND", "qwen"))
     parser.add_argument("--pe-ckpt", default=os.environ.get("JOYOMNI_PE_CKPT"),
                         help="Local Qwen PE checkpoint directory; otherwise use the pinned Hub model.")
@@ -2188,8 +2167,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--face-detection", dest="face_detection",
                         action=argparse.BooleanOptionalAction, default=None,
                         help="Enable face detection at startup and during editing (default mode); mutually exclusive with --full-body-detection.")
-    parser.add_argument("--online-gate", action=argparse.BooleanOptionalAction, default=True,
-                        help=argparse.SUPPRESS)
     parser.add_argument("--presence-absent-frames", type=int, default=12, help="Consecutive not-present frames (body missing, OR face too small / half-out per --face-present-*) before the output goes black. Small = stop FAST (less T2V leak on a quick sit-down / turn-away); larger = tolerate a brief occlusion / head-turn without black-holding. ~24fps, 12 ≈ 0.5s.")
     parser.add_argument("--presence-return-frames", type=int, default=24, help="Consecutive present (body+face) frames required to LEAVE the black-hold and re-run the startup gate. Separate from --presence-absent-frames so entry stays fast (black out quickly) while exit is well de-bounced: a face flickering through finger gaps while hands cover the face won't bounce no_face<->settling. ~24fps, 24 ≈ 1s.")
     parser.add_argument("--person-count-change-frames", type=int, default=24, help="Consecutive frames a NEW face count must hold before it is accepted. An INCREASE then re-edits (reset chunk0) so people who enter later get edited; a decrease only lowers the baseline. Debounce vs transient miscounts (sway / motion blur / a background face flickering in). Keep this larger than --presence-absent-frames so a brief face loss black-holds instead of faking a 0->1 'new person' re-edit. ~24fps, 24 ≈ 1s.")
