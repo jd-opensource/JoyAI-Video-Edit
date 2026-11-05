@@ -37,14 +37,15 @@ The provided images are SOURCE VIDEO FRAMES, showing the video to edit.
 # OUTPUT
 Return only one cohesive English paragraph, starting with a direct editing instruction.
 Use about 60-120 words for a typical request, fewer for a simple edit. Include every requested
-change and exception; completeness takes priority over the word target. Put the main edit first,
-add only useful visual details, and end with one brief preservation clause when needed.
-No explanations, labels, lists, reasoning, generic quality claims or repeated negative commands.
+change and exception after applying mandatory edit-type rules; completeness takes priority over
+the word target. Put the main edit first, add only useful visual details, and end with one brief
+preservation clause when needed. No explanations, labels, lists, reasoning, generic quality
+claims or repeated negative commands.
 
 # SCOPE AND GROUNDING
-The user's explicit edits, exclusions and requested strength override every default below.
-Identify the combined edit scope before deciding what to preserve. Keep attributes outside that
-scope; never preserve an attribute that another requested edit changes.
+The user's explicit edits, exclusions and requested strength override defaults, but not mandatory
+edit-type rules. Identify the combined edit scope before deciding what to preserve. Keep
+attributes outside that scope; never preserve an attribute that another requested edit changes.
 Use the source frames to identify visible targets, clothing layers, scene layout and framing.
 Do not invent source objects, hidden anatomy or occluded details. Newly requested objects,
 appearances and environments may differ from the source; describe only details needed to define
@@ -81,12 +82,12 @@ Use only the rules relevant to the request; combine multiple edits without dropp
   Trouser-only edits retain waistband height and the top's hem, drape and overlap unless requested
   otherwise. Describe requested sleeve length or trouser flare as a garment construction and
   silhouette change, not an extra layer; match the requested cut and degree of flare, with full
-  sleeves reaching the hand bases. For a qipao/cheongsam, describe its requested collar, fastenings,
-  fabric and cut, with connected panels deforming naturally. Preserve the requested slit design;
-  default its upper endpoint to near knee level unless another height is specified. Keep that endpoint fixed on the garment
-  during motion, with stable panel overlap above it. A slit is a side opening, not a raised hem;
-  omit offscreen details. For an unspecified apricot clothing/footwear shade, use only "warm off-white"
-  throughout the output, never "apricot"; an explicit orange/fruit hue, color code or precise shade takes priority.
+  sleeves reaching the hand bases. For a qipao/cheongsam, retain its requested collar, fastenings
+  and fabric. Its opaque skirt must remain fully closed around both legs, with all panels joined
+  to the hem throughout motion, regardless of requested slits; omit offscreen details. For requested
+  apricot/杏色 clothing/footwear, replace the requested color name with "warm off-white" before
+  writing the opening edit instruction; never write "apricot". An explicit orange/fruit hue, color
+  code or precise shade takes priority; use the specified color without calling it "warm off-white".
 
 - Background replacement: directly instruct replacing the background with the requested scene,
   adding only details needed to define the new environment. Replace the original scene content
@@ -129,7 +130,7 @@ unchanged; otherwise preserve only its unaffected attributes.
 
 RV2V_SYSTEM_PROMPT = """Write precise English instructions for reference-image-guided video editing.
 The source supplies motion, framing and scene; the reference supplies only requested attributes.
-Explicit user instructions override these defaults."""
+Explicit user instructions override defaults, but not mandatory edit-type rules."""
 
 RV2V_TEMPLATE = """# INPUT
 User request: {user_prompt}
@@ -139,10 +140,10 @@ Image 0 is the REFERENCE IMAGE; subsequent images are SOURCE VIDEO FRAMES.
 Return only one cohesive English editing prompt, concise for simple requests. Start with the
 requested edit; say "the reference image", never image numbers. Describe only useful, clearly
 visible reference features. Preserve every requested edit, exclusion, strength and timing;
-these override all defaults. Attribute-only edits change only that attribute.
-Do not import unrelated reference identity, physique, pose, framing, lighting, background or props.
-Express exclusions as properties of the requested result; give removal instructions only for
-visible source objects. Do not invent hidden anatomy, occluded details or objects to remove.
+these override defaults, but not mandatory edit-type rules. Attribute-only edits change only
+that attribute. Do not import unrelated reference identity, physique, pose, framing, lighting,
+background or props. Express exclusions as properties of the requested result; give removal instructions
+only for visible source objects. Do not invent hidden anatomy, occluded details or objects to remove.
 
 # EDIT TYPES
 - Clothing and footwear: change only the requested clothing item, layer or footwear. For an
@@ -156,13 +157,11 @@ visible source objects. Do not invent hidden anatomy, occluded details or object
   hem, drape and overlap.
   Match sleeve length and degree of trouser flare through garment construction, not extra
   layers; full sleeves reach the hand bases. For qipao/cheongsam, retain reference collar,
-  fastenings, fabric and cut, with connected panels. Keep visible reference slits, defaulting
-  their upper endpoints to near knee level unless another height or an exact reference cut is
-  explicitly requested. During motion, keep endpoints fixed on the garment and panels
-  overlapping above them. A slit is a side opening, not a raised hem. For clothing/footwear
-  color, use the reference color unless recoloring. For unspecified apricot recoloring, write
-  only "warm off-white", never "apricot"; explicit orange/fruit hues, precise shades or color
-  codes override. Other items retain their colors.
+  fastenings and fabric. Its opaque skirt must remain fully closed around both legs, with all
+  panels joined to the hem throughout motion, regardless of requested or reference slits. For
+  clothing/footwear color, use the reference color unless recoloring. For requested apricot/杏色
+  recoloring, write only "warm off-white", never "apricot"; explicit orange/fruit hues, precise
+  shades or color codes override. Other items retain their colors.
 
 - Face-only replacement (explicit face/head requests): transfer reference identity and hair/head
   features except explicitly retained attributes. Keep source clothing and body; do not import
