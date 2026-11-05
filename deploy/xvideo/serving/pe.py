@@ -79,15 +79,17 @@ Use only the rules relevant to the request; combine multiple edits without dropp
   clothing, footwear and accessories outside the replacement scope, along with source identity
   and body proportions. Fit new garments naturally to create a flattering, slender silhouette
   while preserving the requested loose or tailored cut. A color-only edit retains cut or shape.
-  Trouser-only edits retain waistband height and the top's hem, drape and overlap unless requested
-  otherwise. Describe requested sleeve length or trouser flare as a garment construction and
-  silhouette change, not an extra layer; match the requested cut and degree of flare, with full
-  sleeves reaching the hand bases. For a qipao/cheongsam, retain its requested collar, fastenings
-  and fabric. Its opaque skirt must remain fully closed around both legs, with all panels joined
-  to the hem throughout motion, regardless of requested slits; omit offscreen details. For requested
-  apricot/杏色 clothing/footwear, replace the requested color name with "warm off-white" before
-  writing the opening edit instruction; never write "apricot". An explicit orange/fruit hue, color
-  code or precise shade takes priority; use the specified color without calling it "warm off-white".
+  Trouser-only edits retain waistband height and the top's hem, drape and overlap unless
+  requested otherwise. Describe requested sleeve length or trouser flare as a garment
+  construction and silhouette change, not an extra layer; match the requested cut and degree of
+  flare, include "full sleeves reach the hand bases" for long-sleeved garments. Lantern sleeves
+  have rounded volume tapering to narrow wrist openings at the hand bases. For qipao/cheongsam
+  only, retain requested collar, fastenings and fabric; explicitly describe a continuous opaque
+  skirt fully closed around both legs, all panels joined to the hem throughout motion regardless
+  of requested slits; omit offscreen details. For requested apricot/杏色 clothing/footwear,
+  substitute "warm off-white" for every occurrence of the requested color name; never write
+  "apricot". An explicit orange/fruit hue, color code or precise shade takes priority; use the
+  specified color without calling it "warm off-white".
 
 - Background replacement: directly instruct replacing the background with the requested scene,
   adding only details needed to define the new environment. Replace the original scene content
@@ -150,18 +152,19 @@ only for visible source objects. Do not invent hidden anatomy, occluded details 
   unqualified top replacement, also replace layers concealing it, including outerwear and
   shoulder-draped coverings, unless explicitly retained. Keep clothing, footwear and accessories
   outside the replacement scope, along with source identity and body proportions. Replace
-  targeted items with the reference design, matching cut or shape, color, material and pattern
-  without blending in the source item's details. Fit new garments naturally to create a
-  flattering, slender silhouette while preserving the reference garment's loose or tailored
-  cut unless otherwise requested. Trouser-only edits retain waistband height and the top's
-  hem, drape and overlap.
-  Match sleeve length and degree of trouser flare through garment construction, not extra
-  layers; full sleeves reach the hand bases. For qipao/cheongsam, retain reference collar,
-  fastenings and fabric. Its opaque skirt must remain fully closed around both legs, with all
-  panels joined to the hem throughout motion, regardless of requested or reference slits. For
-  clothing/footwear color, use the reference color unless recoloring. For requested apricot/杏色
-  recoloring, write only "warm off-white", never "apricot"; explicit orange/fruit hues, precise
-  shades or color codes override. Other items retain their colors.
+  targeted items with the reference garment, explicitly naming "the reference image", matching
+  cut or shape, color, material and pattern without blending in the source item's details. Fit
+  new garments naturally to create a flattering, slender silhouette while preserving the
+  reference garment's loose or tailored cut unless otherwise requested. Trouser-only edits
+  retain waistband height and the top's hem, drape and overlap. Match sleeve length and degree
+  of trouser flare through garment construction, not extra layers; include "full sleeves reach
+  the hand bases" for long-sleeved garments. Lantern sleeves have rounded volume tapering to
+  narrow wrist openings at the hand bases. For qipao/cheongsam only, retain reference collar,
+  fastenings and fabric; explicitly describe a continuous opaque skirt fully closed around both
+  legs, all panels joined to the hem throughout motion regardless of requested/reference slits.
+  Use user-specified clothing/footwear colors; otherwise use reference colors. For requested
+  apricot/杏色 colors, write only "warm off-white", never "apricot"; explicit orange/fruit hues,
+  precise shades or color codes override. Other items retain their colors.
 
 - Face-only replacement (explicit face/head requests): transfer reference identity and hair/head
   features except explicitly retained attributes. Keep source clothing and body; do not import
