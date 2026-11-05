@@ -133,8 +133,6 @@
     button.prompt-case.has-ref:hover { border-color: var(--accent); }
     .prompt-case .pc-title { display: block; font-size: 13px; font-weight: 700; }
     .prompt-case .pc-desc { display: block; font-size: 11px; font-weight: 400; color: var(--muted); margin-top: 2px; }
-    .legacy-hidden { display: none !important; }
-    #maxTemporalIdsWrap { display: none; }
     .metric { color: var(--muted); font-size: 11px; }
     .stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 6px; }
     .stats-grid .stat { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; }
@@ -298,34 +296,18 @@
   <div id="cardsPop" class="cards-pop"></div>
 </div>
 
-<div class="legacy-hidden">
-  <div class="row">
-    <div><input id="width" type="number" value="840" /></div>
-    <div><input id="height" type="number" value="480" /></div>
-  </div>
-  <div class="row">
-    <div><input id="cameraFps" type="number" value="24" min="1" max="60" /></div>
-    <div><input id="fps" type="number" value="24" min="1" max="32" /></div>
-  </div>
-  <div class="row">
-    <div><input id="quality" type="number" value="0.6" min="0.1" max="1" step="0.01" /></div>
-  </div>
-  <input id="steps" type="number" value="2" min="1" max="8" />
-  <label><input id="smoothPlayback" type="checkbox" checked /> <span data-i18n="smooth_playback">平滑输出播放</span></label>
-  <div id="playbackDelayWrap" class="row">
-    <div><input id="targetQueueDelayMs" type="number" value="200" min="0" max="5000" step="50" /></div>
-    <div><input id="maxQueueDelayMs" type="number" value="300" min="0" max="8000" step="50" /></div>
-  </div>
-  <input id="kvResetFrames" type="number" value="600" min="0" step="1" />
-  <label><input id="useMaxTemporalIds" type="checkbox" checked /> <span data-i18n="max_temporal">最大时序 ID</span></label>
-  <div id="maxTemporalIdsWrap"><input id="maxTemporalIds" type="number" value="8" min="1" step="1" /></div>
-  <label><input id="freezeKvOnStatic" type="checkbox" /> <span data-i18n="freeze_kv">静止时冻结 KV</span></label>
-  <input id="staticDiffThresh" type="number" value="2.0" min="0" step="0.5" />
-</div>
 <canvas id="capture" style="display:none"></canvas>
 <div id="refLightbox" class="ref-lightbox"><img id="refLightboxImg" alt="reference enlarged" /></div>
 <script>
 const SERVER_DEFAULTS = __SERVER_DEFAULTS__;
+const sessionConfig = {
+  ...SERVER_DEFAULTS,
+  camera_fps: 24,
+  uplink_quality: 0.6,
+  smooth_playback: true,
+  target_queue_delay_ms: 200,
+  max_queue_delay_ms: 300,
+};
 
 const I18N = {
   zh: {
@@ -356,9 +338,6 @@ const I18N = {
     frame_speed: "送帧速度",
     q_low: "低", q_mid: "中", q_high: "高", q_auto: "自动",
     scene_label: "例子：",
-    smooth_playback: "平滑输出播放",
-    max_temporal: "最大时序 ID",
-    freeze_kv: "静止时冻结 KV",
     pe_enhanced_label: "增强提示词",
     busy_starting: "正在启动",
     busy_running: "正在运行",
@@ -422,9 +401,6 @@ const I18N = {
     frame_speed: "Frame rate",
     q_low: "Low", q_mid: "Mid", q_high: "High", q_auto: "Auto",
     scene_label: "Examples:",
-    smooth_playback: "Smooth playback",
-    max_temporal: "Max temporal IDs",
-    freeze_kv: "Freeze KV when static",
     pe_enhanced_label: "Enhanced prompt",
     busy_starting: "Starting",
     busy_running: "Running",
@@ -526,7 +502,6 @@ function hidePeResult() {
   if (peResultEl) { peResultEl.style.display = "none"; peResultEl.textContent = ""; }
 }
 const sendBtn = document.getElementById("send");
-const maxTemporalIdsWrap = document.getElementById("maxTemporalIdsWrap");
 const startCameraBtn = document.getElementById("startCameraBtn");
 const cameraOverlay = document.getElementById("cameraOverlay");
 const outputIdleOverlay = document.getElementById("outputIdleOverlay");
@@ -576,11 +551,9 @@ function showOutputIdle(show) {
 function updateResBanner() {
   const el = document.getElementById("resBanner");
   const txt = document.getElementById("resBannerText");
-  const wEl = document.getElementById("width");
-  const hEl = document.getElementById("height");
-  if (!el || !txt || !wEl || !hEl) return;
-  const w = Number(wEl.value) || 0;
-  const h = Number(hEl.value) || 0;
+  if (!el || !txt) return;
+  const w = sessionConfig.width;
+  const h = sessionConfig.height;
   if (!w || !h || w * h >= 720 * 1248 * 0.9) { el.style.display = "none"; return; }
   txt.textContent = t("res_notice").replace("{res}", w + "×" + h);
   el.style.display = "";
@@ -616,8 +589,8 @@ function updateCropMask() {
   const dispH = vh * scale;
   const dispLeft = camera.offsetLeft + (boxW - dispW) / 2;
   const dispTop = camera.offsetTop + (boxH - dispH) / 2;
-  const tW = Number(document.getElementById("width").value) || vw;
-  const tH = Number(document.getElementById("height").value) || vh;
+  const tW = Number(sessionConfig.width) || vw;
+  const tH = Number(sessionConfig.height) || vh;
   const dstAr = tW / tH;
   const srcAr = vw / vh;
   let fw, fh;
@@ -674,26 +647,14 @@ function stopRecordDrain() {
 }
 let startingRun = false;
 let sessionGranted = false;
-let peCache = null;
-let sourceRevision = 0;
 let activeSessionId = null;
-let pendingPeCacheKey = null;
 let outputPlaybackTimer = null;
 let outputPlaybackIntervalMs = null;
-const DEFAULT_TARGET_OUTPUT_QUEUE_DELAY_MS = 200;
-const DEFAULT_MAX_OUTPUT_QUEUE_DELAY_MS = 300;
 function targetOutputQueueDelayMs() {
-  const el = document.getElementById("targetQueueDelayMs");
-  const raw = el && el.value !== "" ? el.value : null;
-  const v = raw === null ? NaN : Number(raw);
-  const target = Number.isFinite(v) && v >= 0 ? v : DEFAULT_TARGET_OUTPUT_QUEUE_DELAY_MS;
-  return Math.min(target, maxOutputQueueDelayMs());
+  return Math.min(sessionConfig.target_queue_delay_ms, maxOutputQueueDelayMs());
 }
 function maxOutputQueueDelayMs() {
-  const el = document.getElementById("maxQueueDelayMs");
-  const raw = el && el.value !== "" ? el.value : null;
-  const v = raw === null ? NaN : Number(raw);
-  return Number.isFinite(v) && v >= 0 ? v : DEFAULT_MAX_OUTPUT_QUEUE_DELAY_MS;
+  return sessionConfig.max_queue_delay_ms;
 }
 const MAX_BACKEND_PENDING_FRAMES = 32;
 let sendRealtimeSkips = 0;
@@ -774,13 +735,12 @@ function noteBackendAck(msg) {
 }
 
 function smoothPlaybackEnabled() {
-  const el = document.getElementById("smoothPlayback");
-  return !el || el.checked;
+  return sessionConfig.smooth_playback;
 }
 
 function currentOrientation() {
-  const w = Number(document.getElementById("width").value) || 0;
-  const h = Number(document.getElementById("height").value) || 0;
+  const w = Number(sessionConfig.width) || 0;
+  const h = Number(sessionConfig.height) || 0;
   return h > w ? "portrait" : "landscape";
 }
 function defaultCameraOrientation() {
@@ -789,17 +749,15 @@ function defaultCameraOrientation() {
   return (isMobile || portraitViewport) ? "portrait" : "landscape";
 }
 function orientDims(o) {
-  const d = SERVER_DEFAULTS || {};
-  const a = Number(d.width) || 840;
-  const b = Number(d.height) || 480;
+  const a = SERVER_DEFAULTS.width;
+  const b = SERVER_DEFAULTS.height;
   const long = Math.max(a, b), short = Math.min(a, b);
   return o === "portrait" ? { width: short, height: long } : { width: long, height: short };
 }
 function applyOrientation(o) {
-  invalidatePeSource();
   const dims = orientDims(o);
-  document.getElementById("width").value = dims.width;
-  document.getElementById("height").value = dims.height;
+  sessionConfig.width = dims.width;
+  sessionConfig.height = dims.height;
   updateCropMask();
   updateMetrics();
 }
@@ -810,22 +768,11 @@ function refImageSelected() {
 }
 
 function maxTemporalIdsValue() {
-  const enabled = document.getElementById("useMaxTemporalIds");
-  if (!enabled || !enabled.checked) return null;
-  const m = Math.floor(Number(document.getElementById("maxTemporalIds").value));
+  const m = Math.floor(Number(sessionConfig.max_temporal_ids));
   return Number.isFinite(m) && m > 0 ? m : null;
 }
 
-function peCacheKey(rawPrompt, refImage) {
-  return JSON.stringify({ prompt: rawPrompt || "", refImage: refImage || "", sourceRevision,
-    width: document.getElementById("width").value, height: document.getElementById("height").value });
-}
 
-function invalidatePeSource() {
-  sourceRevision += 1;
-  peCache = null;
-  pendingPeCacheKey = null;
-}
 
 function startFrameTimer() {
   if (timer) clearInterval(timer);
@@ -889,18 +836,14 @@ async function handleRefImageChange() {
   updateMetrics();
 }
 
-function updateMaxTemporalIdsVisibility() {
-  const enabled = document.getElementById("useMaxTemporalIds").checked;
-  document.getElementById("maxTemporalIds").disabled = !enabled;
-  if (maxTemporalIdsWrap) maxTemporalIdsWrap.style.display = enabled ? "block" : "none";
-}
+
 
 function cameraTargetFps() {
-  return Math.max(1, Number(document.getElementById("cameraFps").value) || 24);
+  return Math.max(1, sessionConfig.camera_fps);
 }
 
 function sendTargetFps() {
-  return Math.max(1, Number(document.getElementById("fps").value) || 8);
+  return Math.max(1, sessionConfig.fps);
 }
 
 function outputPlaybackFps() {
@@ -1189,7 +1132,7 @@ const upPendingByTs = new Map();
 
 function effectiveUpQuality() {
   if (upAuto) return upAutoHigh ? 0.6 : 0.4;
-  return Number(document.getElementById("quality").value) || 0.4;
+  return sessionConfig.uplink_quality;
 }
 
 function upEncoderBitrate(width, height) {
@@ -1509,8 +1452,8 @@ async function tick() {
       updateMetrics();
       return;
     }
-    const width = Number(document.getElementById("width").value);
-    const height = Number(document.getElementById("height").value);
+    const width = Number(sessionConfig.width);
+    const height = Number(sessionConfig.height);
     if (upCodecH264) {
       encodeUplinkFrame(width, height);
       updateMetrics();
@@ -1546,8 +1489,8 @@ function seekVideoTo(timeSec) {
 }
 async function sendCurrentVideoFrame(mediaTimeSec, generation = videoPullGeneration) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-  const width = Number(document.getElementById("width").value);
-  const height = Number(document.getElementById("height").value);
+  const width = Number(sessionConfig.width);
+  const height = Number(sessionConfig.height);
   const quality = effectiveUpQuality();
   const blob = await frameBlob(width, height, quality);
   if (generation !== videoPullGeneration || !blob || !ws || ws.readyState !== WebSocket.OPEN) return false;
@@ -1612,7 +1555,6 @@ async function beginSession() {
   activeSessionId = String(Number(activeSessionId) + 1);
   const sessionId = activeSessionId;
   const socket = ws;
-  if (!usingVideoFile) invalidatePeSource();
   resetRunMetrics();
   pePausedSend = false;
   clearResultVideo();
@@ -1629,22 +1571,10 @@ async function beginSession() {
   if (sessionId !== activeSessionId || socket !== ws) return false;
   const rawPrompt = document.getElementById("prompt").value;
   const usePe = document.getElementById("usePe").checked;
-  const width = Number(document.getElementById("width").value);
-  const height = Number(document.getElementById("height").value);
-  const cacheKey = peCacheKey(rawPrompt, refImage);
-  pendingPeCacheKey = usePe ? cacheKey : null;
-  let cachedEnhancedPrompt = null;
-  peDeferThisSend = false;
-  if (usePe && !document.getElementById("fullBodyDetection").checked && peCache && peCache.key === cacheKey && peCache.enhanced_prompt) {
-    cachedEnhancedPrompt = peCache.enhanced_prompt;
-    showPeResult(cachedEnhancedPrompt, peCache.model);
-  } else if (usePe) {
-    peDeferThisSend = true;
-    hidePeResult();
-  } else {
-    pendingPeCacheKey = null;
-    hidePeResult();
-  }
+  const width = Number(sessionConfig.width);
+  const height = Number(sessionConfig.height);
+  peDeferThisSend = usePe;
+  hidePeResult();
   upCodecH264 = false;
   if (!usingVideoFile && typeof VideoEncoder !== "undefined") {
     try {
@@ -1658,11 +1588,11 @@ async function beginSession() {
     prompt: rawPrompt,
     width,
     height,
-    num_inference_steps: Number(document.getElementById("steps").value),
+    num_inference_steps: Number(sessionConfig.num_inference_steps),
     use_pe: usePe,
     detection_mode: detectionMode(),
     seed: SERVER_DEFAULTS.seed,
-    kv_reset_frames: Math.max(0, Math.floor(Number(document.getElementById("kvResetFrames").value) || 0)),
+    kv_reset_frames: Math.max(0, Math.floor(Number(sessionConfig.kv_reset_frames) || 0)),
     output_quality: Number(downQualityUi.value),
     fps: sendTargetFps(),
     output_codec: h264DecodeOk ? "h264" : "mjpeg",
@@ -1671,12 +1601,10 @@ async function beginSession() {
   if (usingVideoFile) {
     startPayload.source = "file";
   }
-  if (cachedEnhancedPrompt) startPayload.enhanced_prompt = cachedEnhancedPrompt;
   if (refImage) startPayload.ref_image = refImage;
   startPayload.max_temporal_ids = maxTemporalIdsValue();
-  startPayload.freeze_kv_on_static = !usingVideoFile && document.getElementById("freezeKvOnStatic").checked;
-  const sdt = parseFloat(document.getElementById("staticDiffThresh").value);
-  startPayload.static_diff_thresh = Number.isFinite(sdt) ? sdt : 0.5;
+  startPayload.freeze_kv_on_static = !usingVideoFile && sessionConfig.freeze_kv_on_static;
+  startPayload.static_diff_thresh = sessionConfig.static_diff_thresh;
   startPayload.profile_timings = document.getElementById("profileTimings").checked;
   sessionProfileTimings = startPayload.profile_timings;
   stageTimingsPanel.style.display = sessionProfileTimings ? "" : "none";
@@ -1722,10 +1650,10 @@ async function start() {
         return;
       }
       if (msg.type === "started") {
-        peDeferThisSend = msg.pe_deferred ?? (peDeferThisSend && msg.use_pe !== false);
+        peDeferThisSend = msg.pe_deferred;
         if (Number(msg.width) > 0 && Number(msg.height) > 0) {
-          document.getElementById("width").value = msg.width;
-          document.getElementById("height").value = msg.height;
+          sessionConfig.width = msg.width;
+          sessionConfig.height = msg.height;
           updateCropMask();
           updateResBanner();
         }
@@ -1793,16 +1721,13 @@ async function start() {
         clearOutputQueue();
         lastShownCaptureMs = Date.now();
         alignMaxAgeMs = 0;
-        if (usingVideoFile && peDeferThisSend && !msg.cached) {
+        if (usingVideoFile && peDeferThisSend) {
           peDeferThisSend = false;
           try { camera.pause(); } catch (err) {}
           startVideoPull(true);
         }
         const enhanced = msg.enhanced_prompt || msg.raw_prompt || "";
         showPeResult((msg.error || msg.fallback) ? "" : enhanced, msg.model);
-        if (pendingPeCacheKey && msg.enhanced_prompt && !msg.error && !msg.fallback) {
-          peCache = { key: pendingPeCacheKey, enhanced_prompt: msg.enhanced_prompt, raw_prompt: msg.raw_prompt || "", model: msg.model || "" };
-        }
         return;
       }
       if (msg.type === "session_reset") {
@@ -2220,7 +2145,6 @@ syncPeAvailability();
 function handleVideoFileChange(event) {
   const file = event.target.files && event.target.files[0];
   if (!file) return;
-  invalidatePeSource();
   stopActiveRun();
   camera.onended = null;
   camera.onloadedmetadata = null;
@@ -2290,7 +2214,6 @@ function handleVideoEnded() {
 }
 
 function switchToCamera() {
-  invalidatePeSource();
   stopActiveRun();
   startingRun = false;
   sessionGranted = false;
@@ -2538,27 +2461,11 @@ document.addEventListener("click", (e) => {
   if (sceneChipsEl && sceneChipsEl.contains(e.target)) return;
   closeCardsPop();
 });
-document.getElementById("smoothPlayback").addEventListener("change", () => {
-  if (smoothPlaybackEnabled()) ensureOutputPlaybackTimer(true);
-  else flushOutputQueueToLatest();
-  updateMetrics();
-});
-for (const id of ["targetQueueDelayMs", "maxQueueDelayMs"]) {
-  document.getElementById(id).addEventListener("input", () => {
-    if (smoothPlaybackEnabled()) trimOutputQueueForLatency();
-    updateMetrics();
-  });
-}
-document.getElementById("useMaxTemporalIds").addEventListener("change", () => {
-  updateMaxTemporalIdsVisibility();
-  updateMetrics();
-});
-for (const id of ["width", "height", "cameraFps", "fps", "quality", "steps", "usePe", "refImage", "smoothPlayback", "targetQueueDelayMs", "maxQueueDelayMs", "kvResetFrames", "useMaxTemporalIds", "maxTemporalIds", "freezeKvOnStatic", "staticDiffThresh", "profileTimings", "faceDetection", "fullBodyDetection"]) {
+for (const id of ["usePe", "refImage", "profileTimings", "faceDetection", "fullBodyDetection"]) {
   document.getElementById(id).addEventListener("input", updateMetrics);
   document.getElementById(id).addEventListener("change", updateMetrics);
 }
 var upqTierEl = document.getElementById("upqTier");
-const qualityLegacyEl = document.getElementById("quality");
 function highlightUpqTier(which) {
   for (const b of upqTierEl.querySelectorAll("button")) {
     b.classList.toggle("on", b.getAttribute("data-upq") === String(which));
@@ -2572,7 +2479,7 @@ function highlightUpqTier(which) {
   }
 }
 function syncUpQualityUi() {
-  highlightUpqTier(upAuto ? "auto" : qualityLegacyEl.value);
+  highlightUpqTier(upAuto ? "auto" : sessionConfig.uplink_quality);
 }
 for (const b of upqTierEl.querySelectorAll("button")) {
   b.addEventListener("click", () => {
@@ -2583,7 +2490,7 @@ for (const b of upqTierEl.querySelectorAll("button")) {
       upAutoClear = 0;
     } else {
       upAuto = false;
-      qualityLegacyEl.value = v;
+      sessionConfig.uplink_quality = Number(v);
     }
     highlightUpqTier(v);
     resetUplinkEncoder();
@@ -2637,12 +2544,11 @@ if (qtierEl) {
   }
 }
 const fpsTierEl = document.getElementById("fpsTier");
-const fpsInputEl = document.getElementById("fps");
 if (fpsTierEl) {
   for (const b of fpsTierEl.querySelectorAll("button")) {
     b.addEventListener("click", () => {
       const v = b.getAttribute("data-fps");
-      if (fpsInputEl) fpsInputEl.value = v;
+      sessionConfig.fps = Number(v);
       for (const x of fpsTierEl.querySelectorAll("button")) x.classList.toggle("on", x === b);
       if (timer) { clearInterval(timer); timer = setInterval(tick, Math.floor(1000 / sendTargetFps())); }
       updateMetrics();
@@ -2694,46 +2600,20 @@ for (const id of ["faceDetection", "fullBodyDetection"]) {
     const input = document.getElementById(id);
     if (input.checked) setDetectionMode(id === "faceDetection" ? "near" : "full");
     sourceDetectionModes[usingVideoFile ? "file" : "camera"] = detectionMode();
-    invalidatePeSource();
     updateMetrics();
   });
 }
 function applyServerDefaults() {
-  const d = SERVER_DEFAULTS || {};
-  const numMap = {
-    width: "width", height: "height", steps: "num_inference_steps",
-    fps: "fps",
-    kvResetFrames: "kv_reset_frames", staticDiffThresh: "static_diff_thresh",
-  };
-  for (const [id, key] of Object.entries(numMap)) {
-    const v = d[key];
-    if (v !== null && v !== undefined) document.getElementById(id).value = v;
+  for (const b of fpsTierEl.querySelectorAll("button")) {
+    b.classList.toggle("on", Number(b.getAttribute("data-fps")) === sessionConfig.fps);
   }
-  if (d.fps !== null && d.fps !== undefined) {
-    const tier = document.getElementById("fpsTier");
-    if (tier) for (const b of tier.querySelectorAll("button")) {
-      b.classList.toggle("on", Number(b.getAttribute("data-fps")) === Number(d.fps));
-    }
-  }
-  const boolMap = {
-    freezeKvOnStatic: "freeze_kv_on_static",
-    profileTimings: "profile_timings",
-  };
-  for (const [id, key] of Object.entries(boolMap)) {
-    const v = d[key];
-    if (v !== null && v !== undefined) document.getElementById(id).checked = !!v;
-  }
-  sourceDetectionModes.camera = d.detection_mode || "near";
+  document.getElementById("profileTimings").checked = sessionConfig.profile_timings;
+  sourceDetectionModes.camera = sessionConfig.detection_mode;
   setDetectionMode(sourceDetectionModes[usingVideoFile ? "file" : "camera"]);
-  const maxIds = d.max_temporal_ids;
-  if (maxIds !== undefined) {
-    document.getElementById("useMaxTemporalIds").checked = maxIds !== null;
-    if (maxIds !== null) document.getElementById("maxTemporalIds").value = maxIds;
-  }
-  if (d.output_quality !== undefined && d.output_quality !== "auto") {
+  if (sessionConfig.output_quality !== "auto") {
     autoQuality = false;
-    highlightQTier(Number(d.output_quality));
-    setDownQuality(Number(d.output_quality), { live: false });
+    highlightQTier(Number(sessionConfig.output_quality));
+    setDownQuality(Number(sessionConfig.output_quality), { live: false });
   } else {
     highlightQTier("auto");
     setDownQuality(Q_TIERS[autoQTier], { live: false });
@@ -2751,7 +2631,6 @@ window.addEventListener("load", () => {
   }
   applyLang();
   applyOrientation(defaultCameraOrientation());
-  updateMaxTemporalIdsVisibility();
   syncRefThumb();
   showOutputIdle(true);
   updateMetrics();
