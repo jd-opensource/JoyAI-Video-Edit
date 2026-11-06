@@ -340,7 +340,7 @@ Key variables:
 | `JOYOMNI_CUDA_GRAPH` | capture the steady-state chunk loop into a CUDA graph (default `1`; the biggest single speedup). `0` runs eager. |
 | `JOYOMNI_FA4_ATTN` | Try FA4 first when installed (default `1`). Set `1` on B200; set `0` on RTX PRO 6000 / RTX 5090. HF ZeroGPU defaults to `0`. |
 | `JOYOMNI_SAGE_ATTN` | Use SageAttention when FA4 is disabled or unavailable (default `0`). Set `1` with `JOYOMNI_FA4_ATTN=0` on RTX 5090; otherwise use PyTorch SDPA. |
-| `JOYOMNI_FP8_FAST_ACCUM` | FP8 GEMMs accumulate in fp16 via a Triton kernel (default `0`; set `1` on RTX 5090, where fp32-accumulate tensor MMAs run at half rate — they run at full rate on RTX PRO 6000 / B200, so leave it unset there). |
+| `JOYOMNI_FP8_FAST_ACCUM` | FP8 GEMMs accumulate in fp16 via a Triton kernel (default `0`; set `1` on RTX 5090, where fp32-accumulate tensor MMAs run at half rate — they run at full rate on RTX PRO 6000 / B200, so leave it unset there). `safe` selects a variant whose fp16 partial sums cannot overflow for any input (activations ≤ 7, weights ≤ 14 in magnitude, fp32 promotion every 512 of K). |
 | `JOYOMNI_LOW_VRAM` | low-VRAM layout — CPU-staged FP8 DiT load + text-encoder CPU offload (default `0`; set `1` on ≤48 GB cards — the full layout needs ~46.5 GB steady at 720p16). Video-only 480p24 measured ~21.5 GiB resident / ~28 GiB peak under a 30 GiB allocator cap. Local Qwen PE needs additional GPU memory. |
 | `JOYOMNI_CACHE_ROOT` | compile-cache root — torchinductor / triton / nv_compute caches live under it (default `deploy/deps/cache`). Give each GPU model its own root when several share a checkout (per-card commands above). |
 | `JOYOMNI_CKPT_ROOT` | override the checkpoints dir (default `deploy/deps/checkpoints`). |
