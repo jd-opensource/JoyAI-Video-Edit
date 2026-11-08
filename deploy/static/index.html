@@ -133,6 +133,10 @@
     button.prompt-case.has-ref:hover { border-color: var(--accent); }
     .prompt-case .pc-title { display: block; font-size: 13px; font-weight: 700; }
     .prompt-case .pc-desc { display: block; font-size: 11px; font-weight: 400; color: var(--muted); margin-top: 2px; }
+    .reference-rows { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; max-height: 65vh; overflow-y: auto; }
+    .cards-pop .reference-grid { grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: clamp(84px, 12vh, 140px); max-height: none; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x proximity; padding-bottom: 4px; }
+    button.prompt-case.reference-card { padding: 6px; border-left-width: 1px; scroll-snap-align: start; }
+    .reference-card .pc-image { display: block; width: 100%; height: auto; aspect-ratio: 2 / 3; object-fit: contain; background: var(--panel-2); border-radius: 6px; }
     .metric { color: var(--muted); font-size: 11px; }
     .stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 6px; }
     .stats-grid .stat { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; }
@@ -280,7 +284,7 @@
         <button type="button" data-fps="32">32</button>
         <button type="button" data-fps="30">30</button>
         <button type="button" data-fps="28">28</button>
-        <button type="button" data-fps="24" class="on">24</button>
+        <button type="button" data-fps="24">24</button>
         <button type="button" data-fps="20">20</button>
         <button type="button" data-fps="16">16</button>
         <button type="button" data-fps="12">12</button>
@@ -477,7 +481,6 @@ function setLang(lang) {
   localStorage.setItem("joyomni_lang", currentLang);
   applyLang();
 }
-let REF_IMAGES = {};
 const camera = document.getElementById("camera");
 const capture = document.getElementById("capture");
 const outputImg = document.getElementById("outputImg");
@@ -1967,13 +1970,12 @@ const PROMPT_GROUPS = [
   },
   {
     key: "ref_tryon",
-    label: "参考图编辑", label_en: "Edit from Reference",
+    label: "参考图换装", label_en: "Reference Try-On",
     cases: [
       { title: "NY 棒球帽", title_en: "NY Cap", desc: "戴上参考图里的黑色 NY 棒球帽", desc_en: "Black NY cap from the reference image", ref: "hat", text: "将参考图中的黑色 NY 棒球帽戴到主角头上，帽子正面朝前。", text_en: "Put the black NY baseball cap from the reference image on the subject's head, facing forward." },
       { title: "红色围巾", title_en: "Red Scarf", desc: "围上参考图里的红色流苏围巾", desc_en: "Red tasseled scarf from the reference image", ref: "scarf", text: "将参考图中的红色流苏围巾围到主角的颈部。", text_en: "Wrap the red tasseled scarf from the reference image around the subject's neck." },
       { title: "粉色T恤", title_en: "Pink Tee", desc: "换上参考图里的粉色短袖 T 恤", desc_en: "Pink short-sleeve tee from the reference image", ref: "pink_tee", text: "将主角的衣服换成参考图里的粉色短袖 T 恤。", text_en: "Replace the subject's clothing with the pink short-sleeve T-shirt from the reference image." },
       { title: "橙色眼镜", title_en: "Orange Glasses", desc: "戴上参考图里的橙色镜片眼镜", desc_en: "Orange-tinted glasses from the reference image", ref: "orange_glasses", text: "给主角戴上参考图里的橙色镜片眼镜。", text_en: "Put the orange-tinted glasses from the reference image on the subject." },
-      { title: "奶龙", title_en: "Nailong", desc: "主角换成参考图里的黄色玩偶", desc_en: "Subject → yellow toy from the reference image", ref: "nailong", text: "将视频中的主角替换为参考图中的黄色玩偶。", text_en: "Replace the main subject in the video with the yellow toy from the reference image." },
     ],
   },
   {
@@ -2036,14 +2038,78 @@ function autosizePrompt() {
 }
 promptBox.addEventListener("input", autosizePrompt);
 
-function applyCaseSelection(item, group) {
+let referenceSelectionToken = 0;
+let referenceSelectionController = null;
+const referenceImageCache = new Map();
+
+async function fetchReference(url, signal = null) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (signal && signal.aborted) throw new DOMException("Cancelled", "AbortError");
+    const controller = new AbortController();
+    const cancel = () => controller.abort();
+    if (signal) signal.addEventListener("abort", cancel, {once: true});
+    const timeout = setTimeout(cancel, 20000);
+    try {
+      const response = await fetch(url, {signal: controller.signal, credentials: "same-origin"});
+      if (!response.ok) {
+        const error = new Error(`Reference HTTP ${response.status}`);
+        error.retryable = response.status === 408 || response.status === 429 || response.status >= 500;
+        throw error;
+      }
+      return await response.blob();
+    } catch (error) {
+      if (signal && signal.aborted) throw new DOMException("Cancelled", "AbortError");
+      if (attempt === 2 || error.retryable === false) throw error;
+    } finally {
+      clearTimeout(timeout);
+      if (signal) signal.removeEventListener("abort", cancel);
+    }
+    await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+  }
+}
+
+async function loadReferenceImage(url, signal) {
+  if (referenceImageCache.has(url)) return referenceImageCache.get(url);
+  const blob = await fetchReference(url, signal);
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("Unable to read reference image"));
+    reader.readAsDataURL(blob);
+  });
+  referenceImageCache.set(url, dataUrl);
+  if (referenceImageCache.size > 8) referenceImageCache.delete(referenceImageCache.keys().next().value);
+  return dataUrl;
+}
+
+async function applyCaseSelection(item, group) {
+  const token = ++referenceSelectionToken;
+  if (referenceSelectionController) referenceSelectionController.abort();
+  hideOutputToast();
+  referenceSelectionController = new AbortController();
+  const url = item.ref_url || (item.ref ? `/reference-images/${encodeURIComponent(item.ref)}` : null);
+  let dataUrl = null;
+  if (url) {
+    showOutputToast(currentLang === "en" ? "Loading reference image…" : "正在加载参考图…", 65000);
+    try { dataUrl = await loadReferenceImage(url, referenceSelectionController.signal); }
+    catch (error) {
+      if (token === referenceSelectionToken && error.name !== "AbortError") {
+        showOutputToast(currentLang === "en" ? "Reference image could not be loaded. Please retry." : "参考图加载失败，请重试。", 6000);
+      }
+      return;
+    }
+    if (token !== referenceSelectionToken) return;
+    hideOutputToast();
+  }
   promptBox.value = sceneField(item, "text");
   autosizePrompt();
-  if (item.ref && REF_IMAGES && REF_IMAGES[item.ref]) {
-    const el = document.getElementById("refImage");
-    if (el) el.value = "";
-    injectedRefImageDataUrl = REF_IMAGES[item.ref];
-    refImagePreviewDataUrl = injectedRefImageDataUrl;
+  if (dataUrl) {
+    const input = document.getElementById("refImage");
+    if (input) input.value = "";
+    injectedRefImageDataUrl = dataUrl;
+    refImagePreviewDataUrl = dataUrl;
+    const usePe = document.getElementById("usePe");
+    if (usePe && SERVER_DEFAULTS.pe_available !== false) usePe.checked = true;
   } else if (!refImageSelected()) {
     injectedRefImageDataUrl = null;
     refImagePreviewDataUrl = null;
@@ -2053,6 +2119,7 @@ function applyCaseSelection(item, group) {
   updateMetrics();
   send();
 }
+
 
 function syncRefThumb() {
   if (!refSlot) return;
@@ -2103,25 +2170,65 @@ function openCategory(group, chipEl) {
     for (const c of sceneChipsEl.querySelectorAll(".chip")) c.classList.toggle("active", c === chipEl);
   }
   cardsPop.innerHTML = "";
-  const grid = document.createElement("div");
-  grid.className = "pop-grid";
-  for (const item of group.cases) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "prompt-case";
-    if (item.ref) btn.classList.add("has-ref");
-    const tEl = document.createElement("span");
-    tEl.className = "pc-title";
-    const _ttl = sceneField(item, "title"); tEl.textContent = item.ref ? ("📎 " + _ttl) : _ttl;
-    const d = document.createElement("span");
-    d.className = "pc-desc";
-    d.textContent = sceneField(item, "desc");
-    btn.appendChild(tEl);
-    btn.appendChild(d);
-    btn.addEventListener("click", () => applyCaseSelection(item, group));
-    grid.appendChild(btn);
+  function renderItems(items, grid) {
+    for (const item of items) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "prompt-case";
+      if (item.ref || item.ref_url) btn.classList.add("has-ref");
+      if (group.rows) {
+        btn.classList.add("reference-card");
+        btn.setAttribute("aria-label", sceneField(item, "title"));
+        const image = document.createElement("img");
+        image.className = "pc-image";
+        image.width = 240; image.height = 360;
+        image.loading = "lazy"; image.decoding = "async";
+        image.alt = sceneField(item, "title");
+        let retries = 0;
+        image.onerror = () => {
+          if (retries >= 2) return;
+          retries++;
+          setTimeout(() => {
+            if (!image.isConnected) return;
+            const retryUrl = new URL(item.thumbnail, location.href);
+            retryUrl.searchParams.set("retry", String(retries));
+            image.src = retryUrl.href;
+          }, retries * 750);
+        };
+        image.src = item.thumbnail;
+        btn.appendChild(image);
+        btn.addEventListener("click", () => applyCaseSelection(item, group));
+        grid.appendChild(btn);
+        continue;
+      }
+      const tEl = document.createElement("span");
+      tEl.className = "pc-title";
+      const _ttl = sceneField(item, "title"); tEl.textContent = item.ref ? ("📎 " + _ttl) : _ttl;
+      const d = document.createElement("span");
+      d.className = "pc-desc";
+      d.textContent = sceneField(item, "desc");
+      btn.appendChild(tEl);
+      btn.appendChild(d);
+      btn.addEventListener("click", () => applyCaseSelection(item, group));
+      grid.appendChild(btn);
+    }
   }
-  cardsPop.appendChild(grid);
+  if (group.rows) {
+    const rows = document.createElement("div");
+    rows.className = "reference-rows";
+    for (const items of group.rows) {
+      const grid = document.createElement("div");
+      grid.className = "pop-grid reference-grid";
+      renderItems(items, grid);
+      rows.appendChild(grid);
+    }
+    cardsPop.appendChild(rows);
+  } else {
+    const grid = document.createElement("div");
+    grid.className = "pop-grid";
+    renderItems(group.cases, grid);
+    cardsPop.appendChild(grid);
+  }
   cardsPop.classList.add("open");
 }
 
@@ -2132,14 +2239,70 @@ function renderPromptCases() {
     const chip = document.createElement("button");
     chip.type = "button";
     chip.className = "chip";
-    if (group.cases.some((c) => c.ref)) chip.classList.add("chip-ref");
+    if (group.cases.some((c) => c.ref || c.ref_url)) chip.classList.add("chip-ref");
     chip.textContent = sceneField(group, "label");
     chip.addEventListener("click", () => openCategory(group, chip));
     sceneChipsEl.appendChild(chip);
   }
 }
+const REFERENCE_ROWS = [
+  [
+    "a415345b-7761-5c1c-bf6b-d9e6a362141c",
+    "d28b4576-4f7a-54a6-a1dc-bb580182899e",
+    "5f315126-de99-5fef-85d0-c88f16ab25cf",
+    "edb734f2-b226-5b91-a4e4-bf15a3883657",
+    "44168b21-1c7d-55ab-b021-2d0714a1cbeb",
+    "5ecee1cf-41bc-5b1c-b843-ef716fa1cf41",
+    "644588e9-e94f-5825-aefe-c7d3075175a0",
+    "97617385-5e87-5109-a231-e6b43db09919",
+    "6705aab5-6ecf-5cfe-9f7c-be9d8650b3eb",
+    "ba97252a-f29a-5286-95ee-2738aa52416c",
+    "7f45ce29-f13e-5421-922c-a200ccb2c9a2",
+    "5099373a-78c7-52d9-bfb1-4edfe1bd0723",
+    "0f2cbd9d-2f93-5271-920a-50aaa3a75708",
+    "6a894c4b-31a0-5477-b1c4-a44c0ede1b66"
+  ],
+  [
+    "0d0ce291-a7e3-4a13-9849-7dc8f179008b",
+    "9db1285f-ef8c-4798-a300-001365653712",
+    "dcad9812-0775-4e9f-b431-c3559b657921",
+    "48530a26-2cce-4ba0-a401-d2a405731f34",
+    "36dea9a6-a3bb-4ffa-b7cf-060d8202b7f7",
+    "8aba4c3d-8591-495b-92f0-e8d18b4a59fa",
+    "032fa073-cff1-4f80-8871-2638d24e01d5",
+    "8669ba99-4af7-4a38-9f4b-bb69dbb12cd0",
+    "03c0f3ca-5c41-49d1-b83c-ba6e0fb05b92",
+    "29bb4cc6-9473-4bfc-b6e0-e2d6f38a8c3b"
+  ],
+  [
+    "51cda1b2-fa1b-5ed1-9809-7caf4caacff2",
+    "53f3298c-5595-5716-99e2-c90d92878f9d",
+    "0481809c-562b-5d59-b4d1-7606b1cb30f5",
+    "1c29feeb-8fc2-5e16-97af-2c96d6fb6704",
+    "48c397cf-0982-5274-bbc3-93667da103f8",
+    "885bc9c0-0077-5a1f-88c7-50f56088c5eb",
+    "55542730-e7ca-5b1c-9857-eb6f783ea80f",
+    "69d700bd-6c99-5539-8da5-647aba641032",
+    "91cf5398-a6fd-57f0-a205-01801d62b9d1",
+    "77966381-5bd8-590a-9be9-9c5fee190d75",
+    "41ed2bcd-b670-5b2e-bfbc-c6afa8e86908",
+    "34149a89-313d-5ce1-9ad7-724aeb159b31"
+  ]
+].map(row => row.map((id, index) => ({
+  title: `参考图 ${index + 1}`,
+  title_en: `Reference image ${index + 1}`,
+  ref_url: `/reference-images/${id}`,
+  thumbnail: `/reference-images/${id}/thumbnail?v=1.1`,
+  text: "将我替换为参考图片中的角色。",
+  text_en: "Replace me with the character in the reference picture.",
+})));
+PROMPT_GROUPS.unshift({
+  key: "replace_person",
+  label: "人物替换", label_en: "Person Replacement",
+  rows: REFERENCE_ROWS,
+  cases: REFERENCE_ROWS.flat(),
+});
 renderPromptCases();
-fetch("/ref-images").then((r) => (r.ok ? r.json() : {})).then((d) => { REF_IMAGES = d || {}; }).catch(() => {});
 syncPeAvailability();
 
 function handleVideoFileChange(event) {

@@ -69,11 +69,11 @@ Use only the rules relevant to the request; combine multiple edits without dropp
   Attribute-only edits, such as aging or hair color, change only the requested attributes.
 
 - Whole-person, character or creature replacement: describe recognizable head/face features and
-  the visible body or outfit that define the requested replacement. A costume change alone is not
-  an identity replacement. Do not preserve source identity, clothing or anatomy that the requested
-  replacement changes, or invent extra props. Honor explicitly retained clothing and accessories.
-  For a material transformation, express retained likeness through that material, rather than
-  claiming the original skin or hair remains unchanged.
+  the visible body or outfit that define the requested replacement. A costume change alone is
+  not an identity replacement. Do not preserve source identity, clothing or anatomy that the
+  requested replacement changes, or invent extra props. Honor explicitly retained clothing and
+  accessories. For a material transformation, express retained likeness through that material,
+  rather than claiming the original skin or hair remains unchanged.
 
 - Clothing and footwear: change only the requested clothing item, layer or footwear. Keep
   clothing, footwear and accessories outside the replacement scope, along with source identity
@@ -81,15 +81,13 @@ Use only the rules relevant to the request; combine multiple edits without dropp
   while preserving the requested loose or tailored cut. A color-only edit retains cut or shape.
   Trouser-only edits retain waistband height and the top's hem, drape and overlap unless
   requested otherwise. Describe requested sleeve length or trouser flare as a garment
-  construction and silhouette change, not an extra layer; match the requested cut and degree of
-  flare, include "full sleeves reach the hand bases" for long-sleeved garments. Lantern sleeves
-  have rounded volume tapering to narrow wrist openings at the hand bases. For qipao/cheongsam
-  only, retain requested collar, fastenings and fabric; explicitly describe a continuous opaque
-  skirt fully closed around both legs, all panels joined to the hem throughout motion regardless
-  of requested slits; omit offscreen details. For requested apricot/杏色 clothing/footwear,
-  substitute "warm off-white" for every occurrence of the requested color name; never write
-  "apricot". An explicit orange/fruit hue, color code or precise shade takes priority; use the
-  specified color without calling it "warm off-white".
+  construction and silhouette change, not an extra layer; match the requested length, cut and
+  degree of flare. Lantern sleeves have rounded volume tapering to narrow cuffs. For
+  qipao/cheongsam only, retain requested collar, fastenings and fabric; explicitly describe a
+  continuous opaque skirt fully closed around both legs, all panels joined to the hem throughout
+  motion regardless of requested slits; omit offscreen details. Treat apricot/杏色 as white.
+  Use exactly "white" for that color; never output "apricot" or "杏色". Do not add color
+  modifiers.
 
 - Background replacement: directly instruct replacing the background with the requested scene,
   adding only details needed to define the new environment. Replace the original scene content
@@ -153,28 +151,39 @@ only for visible source objects. Do not invent hidden anatomy, occluded details 
   shoulder-draped coverings, unless explicitly retained. Keep clothing, footwear and accessories
   outside the replacement scope, along with source identity and body proportions. Replace
   targeted items with the reference garment, explicitly naming "the reference image", matching
-  cut or shape, color, material and pattern without blending in the source item's details. Fit
-  new garments naturally to create a flattering, slender silhouette while preserving the
-  reference garment's loose or tailored cut unless otherwise requested. Trouser-only edits
-  retain waistband height and the top's hem, drape and overlap. Match sleeve length and degree
-  of trouser flare through garment construction, not extra layers; include "full sleeves reach
-  the hand bases" for long-sleeved garments. Lantern sleeves have rounded volume tapering to
-  narrow wrist openings at the hand bases. For qipao/cheongsam only, retain reference collar,
-  fastenings and fabric; explicitly describe a continuous opaque skirt fully closed around both
-  legs, all panels joined to the hem throughout motion regardless of requested/reference slits.
-  Use user-specified clothing/footwear colors; otherwise use reference colors. For requested
-  apricot/杏色 colors, write only "warm off-white", never "apricot"; explicit orange/fruit hues,
-  precise shades or color codes override. Other items retain their colors.
+  cut or shape, color, material and pattern. Fit new garments naturally to create a flattering,
+  slender silhouette while preserving the reference garment's loose or tailored cut unless
+  otherwise requested. Trouser-only edits retain waistband height and the top's hem, drape and
+  overlap. Match the requested or reference sleeve length and degree of trouser flare through
+  garment construction, not extra layers. Lantern sleeves have rounded volume tapering to narrow
+  cuffs. For qipao/cheongsam only, retain reference collar, fastenings and fabric; explicitly
+  describe a continuous opaque skirt fully closed around both legs, all panels joined to the hem
+  throughout motion regardless of requested/reference slits. Use user-specified
+  clothing/footwear colors; otherwise name the actual reference colors. Treat apricot/杏色 as
+  white. Use exactly "white" for that color; never output "apricot" or "杏色". Do not add color
+  modifiers. Keep colors outside the requested edit unchanged.
 
 - Face-only replacement (explicit face/head requests): transfer reference identity and hair/head
   features except explicitly retained attributes. Keep source clothing and body; do not import
   reference outfits or props. Hair-only edits do not change facial identity.
 
-- Whole-person/character/creature replacement: requests such as "replace me with this man/woman"
-  transfer reference identity, hair and visible outfit together by default, not just the face.
-  Describe both head/face and outfit features. Replace source clothing with the reference outfit;
-  do not retain or blend its design unless explicitly requested. Preserve source pose, motion
-  and body proportions unless edited. A costume change alone does not replace identity.
+- Whole-person/character/creature replacement: replace the entire visible subject, including
+  reference identity, outfit and body design. For a simple replacement, write "Replace [source
+  subject] with the subject from the reference image, featuring [defining appearance, main outfit
+  or body design, and distinctive visible structures]." Add a brief clause preserving unaffected
+  source motion, gestures, composition and background. Aim for about 45 words, retaining essential
+  identifying features and explicit user requests. Keep identifying hair or body appearance,
+  essential headwear, and main outfit color, material and design; omit minor accessory inventories.
+  Before drafting, inspect distinctive structures for their visible count and construction.
+  In the final prompt, explicitly combine count, construction, color and structure name, then
+  describe curvature or orientation and attachment position. Retain visible segmentation or
+  joining; a generic name plus shape or size is insufficient. Prioritize these structural details
+  over incidental eye color, minor accessories and size adjectives when keeping the prompt short.
+  Do not infer hidden counts or add unsupported textures, materials or size. Describe reference subject
+  appearance only, not its scenery, lighting, pose or unrelated props. Apply reference body colors,
+  materials and style to all visible body parts, including hands. When parts are not shown, extend
+  the established appearance consistently without inventing anatomy or clothing. Omit uncertain
+  object labels. Explicit exceptions or additional edits take priority over the pattern.
 
 - Background replacement: directly instruct replacing the background with the environment in
   the reference image, adding only visible details needed to define it. Replace the original
@@ -196,15 +205,15 @@ watermarks unless requested. For removal, identify the text's scope without repe
 
 # VIDEO AND PRESERVATION
 Apply the edit from the first frame unless gradual or timed changes are requested. Follow each
-source frame's pose, shoulder contour, arm positions, scale and motion; never freeze the anchor
-pose or copy the reference stance. Maintain tracking, occlusion, garment deformation and natural
-layering/contact around retained accessories, with appropriate shadows and reflections.
-Respect source framing; never zoom out to show an edit. A complete outfit applies as its parts
-become visible later. Retain explicitly requested details, but elaborate only currently visible,
-image-supported features; do not invent offscreen anatomy or garment details.
-End with a brief preservation clause for unaffected attributes, including the background when
-unedited. Never preserve or restore source appearances replaced, covered or transformed by any
-requested edit.
+source frame's action and subject placement; never freeze the anchor pose or copy the reference
+stance. For whole-subject replacement, match the reference anatomy instead of source proportions.
+Maintain tracking, occlusion, garment deformation and natural layering/contact around retained
+accessories, with appropriate shadows and reflections. Respect source framing; never zoom out to
+show an edit. A complete outfit applies as its parts become visible later. Retain explicitly requested
+details, but elaborate only currently visible, image-supported features; do not invent offscreen
+anatomy or garment details. End with a brief preservation clause for unaffected attributes,
+including the background when unedited. Never preserve or restore source appearances replaced,
+covered or transformed by any requested edit.
 """
 
 

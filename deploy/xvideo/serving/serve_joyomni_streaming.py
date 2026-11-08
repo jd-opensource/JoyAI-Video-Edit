@@ -23,7 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from PIL import Image
 import uvicorn
@@ -76,38 +76,6 @@ class SessionGate:
 
 
 WS_SEND_TIMEOUT_S = 10.0
-
-REF_IMAGE_DIR = REPO_ROOT / "rv2v_reference"
-REF_IMAGE_FILES = {
-    "hat": "4e481f7a-2443-4935-a841-af6113cc4236.png",
-    "scarf": "5e178546-3ebf-40df-bb86-01613dd96c3b.png",
-    "pink_tee": "1c182f2f-32cf-4825-904e-64c69aed2e31.png",
-    "orange_glasses": "486b9561-e73d-45ca-bb2d-2a47998a0a73.png",
-    "nailong": "nailong.png",
-}
-
-def _load_ref_images() -> dict[str, str]:
-    out: dict[str, str] = {}
-    for name, fname in REF_IMAGE_FILES.items():
-        path = REF_IMAGE_DIR / fname
-        try:
-            data = path.read_bytes()
-        except OSError as exc:
-            print(f"#####[STREAM] ref image {name!r} unavailable ({path}): {exc!r}")
-            continue
-        mime = "image/jpeg" if path.suffix.lower() in (".jpg", ".jpeg") else "image/png"
-        out[name] = f"data:{mime};base64," + base64.b64encode(data).decode("ascii")
-    return out
-
-
-_REF_IMAGES_CACHE: dict[str, str] | None = None
-
-def _ref_images_cached() -> dict[str, str]:
-    global _REF_IMAGES_CACHE
-    if _REF_IMAGES_CACHE is None:
-        _REF_IMAGES_CACHE = _load_ref_images()
-    return _REF_IMAGES_CACHE
-
 
 _INDEX_HTML_PATH = Path(__file__).resolve().parents[2] / "static" / "index.html"
 
@@ -447,6 +415,21 @@ def _check_full_body_gate(image, *, face_center, onnx_path, conf):
     return "full_body_needed"
 
 
+
+def _load_current_pe_module():
+    """Snapshot PE code per request without reloading models or shared module globals."""
+    import hashlib
+    from types import ModuleType
+
+    path = Path(__file__).with_name("pe.py")
+    source = path.read_bytes()
+    digest = hashlib.sha256(source).hexdigest()
+    module = ModuleType("_request_pe_" + digest)
+    module.__file__ = str(path)
+    exec(compile(source, str(path), "exec"), module.__dict__)
+    return module, digest
+
+
 async def _enhance_prompt(
     *,
     raw_prompt: str,
@@ -744,6 +727,43 @@ def create_app(args: argparse.Namespace) -> FastAPI:
     app.state.ws_debug = {}
 
     app.state.session_gate = SessionGate()
+    reference_root = REPO_ROOT / "rv2v_reference"
+    legacy_references = {
+        "hat": "4e481f7a-2443-4935-a841-af6113cc4236.png",
+        "scarf": "5e178546-3ebf-40df-bb86-01613dd96c3b.png",
+        "pink_tee": "1c182f2f-32cf-4825-904e-64c69aed2e31.png",
+        "orange_glasses": "486b9561-e73d-45ca-bb2d-2a47998a0a73.png",
+    }
+
+    def reference_response(image_id: str, request: Request, thumbnail: bool = False):
+        if image_id in legacy_references and not thumbnail:
+            path = reference_root / legacy_references[image_id]
+        else:
+            try:
+                if str(uuid.UUID(image_id)) != image_id:
+                    raise ValueError
+            except ValueError:
+                raise HTTPException(status_code=404, detail="Reference image not found")
+            directory = reference_root / ("thumbnails" if thumbnail else "ip")
+            path = directory / f"{image_id}{'.jpg' if thumbnail else '.png'}"
+            if path.resolve().parent != directory.resolve():
+                raise HTTPException(status_code=404, detail="Reference image not found")
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="Reference image not found")
+        stat = path.stat()
+        etag = f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
+        headers = {"Cache-Control": "public, max-age=86400", "ETag": etag}
+        if request.headers.get("if-none-match") in (etag, "*"):
+            return Response(status_code=304, headers=headers)
+        return FileResponse(path, media_type="image/jpeg" if thumbnail else "image/png", headers=headers)
+
+    @app.get("/reference-images/{image_id}/thumbnail")
+    def reference_thumbnail(image_id: str, request: Request):
+        return reference_response(image_id, request, thumbnail=True)
+
+    @app.get("/reference-images/{image_id}")
+    def reference_image(image_id: str, request: Request):
+        return reference_response(image_id, request)
 
     @app.get("/")
     def index() -> HTMLResponse:
@@ -767,10 +787,6 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         }
         html = _load_index_html().replace("__SERVER_DEFAULTS__", json.dumps(server_defaults))
         return HTMLResponse(html)
-
-    @app.get("/ref-images")
-    def ref_images() -> JSONResponse:
-        return JSONResponse(_ref_images_cached())
 
     @app.get("/health")
     def health() -> JSONResponse:
@@ -825,6 +841,63 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 "session": session_debug,
             }
         )
+
+    @app.post("/pe/enhance")
+    async def enhance_only(request: Request) -> JSONResponse:
+        """Expand a prompt using existing PE weights; never create a video session."""
+        runtime = app.state.runtime
+        if runtime is None or app.state.runtime_error is not None:
+            raise HTTPException(status_code=503, detail="Runtime is not ready")
+        if not pe_available(args.pe_backend):
+            raise HTTPException(status_code=503, detail="PE backend is unavailable")
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("Expected a JSON object")
+            raw_prompt = payload.get("prompt")
+            if not isinstance(raw_prompt, str) or not raw_prompt.strip():
+                raise ValueError("A nonempty prompt is required")
+            timeout = float(payload.get("timeout_s", 60))
+            if not 0 < timeout <= 300:
+                raise ValueError("timeout_s must be between 0 and 300")
+            ref_image = _decode_ref_image(payload.get("ref_image"))
+            reference_id = payload.get("reference_image_id")
+            if reference_id is not None:
+                if ref_image is not None or str(uuid.UUID(reference_id)) != reference_id:
+                    raise ValueError("Supply one canonical reference ID or ref_image")
+                path = reference_root / "ip" / (reference_id + ".png")
+                with Image.open(path) as image:
+                    ref_image = image.convert("RGB")
+            frame = _decode_ref_image(payload.get("source_frame"))
+            task_type = payload.get("task_type", "rv2v" if ref_image is not None else "v2v")
+            if task_type not in ("rv2v", "v2v") or task_type == "rv2v" and ref_image is None:
+                raise ValueError("RV2V requires a reference image")
+        except (ValueError, TypeError, AttributeError, OSError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        pe_module, digest = _load_current_pe_module()
+        expected = payload.get("expected_pe_sha256")
+        if expected is not None and expected != digest:
+            raise HTTPException(status_code=409, detail="PE version changed")
+        started = time.perf_counter()
+        enhancer = (pe_module.QwenPromptEnhancer(runtime.pipeline, app.state.inference_lock)
+                    if args.pe_backend == "qwen"
+                    else pe_module.PromptEnhancer(model=args.pe_model))
+        enhanced = await enhancer.enhance(
+            task_type, raw_prompt, video=[frame] if frame is not None else None,
+            ref_image=ref_image, timeout=timeout,
+        )
+        report = dict(
+            enabled=True, backend=args.pe_backend, task_type=task_type,
+            model=enhancer.model, raw_prompt=raw_prompt, enhanced_prompt=enhanced,
+            elapsed_s=time.perf_counter() - started, fallback=enhanced == raw_prompt,
+            cached=False, pe_sha256=digest, pe_only=True,
+        )
+        if args.pe_backend == "qwen":
+            report.update(template=enhancer.template,
+                          decoder=getattr(enhancer, "decoder", "eager"),
+                          timings=enhancer.timings)
+        return JSONResponse(report)
 
     @app.post("/load")
     def load() -> JSONResponse:
