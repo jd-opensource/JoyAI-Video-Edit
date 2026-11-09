@@ -11,15 +11,14 @@ from joyomni_ops import fp8_scaled_mm, sgl_per_token_quant_fp8
 FP8_DTYPE = torch.float8_e4m3fn
 FP8_MAX = torch.finfo(FP8_DTYPE).max
 
-# --- GeForce fast-accum path (JOYOMNI_FP8_FAST_ACCUM=1) ---------------------
-# GeForce runs fp32-accumulate tensor MMAs at half rate; fp16 accumulation is
-# full rate, so this Triton kernel accumulates in fp16. Safety: both operands
-# are quantized into 1/16 of the e4m3 range (|q| <= 28 -- an exponent shift,
-# zero precision cost), keeping the fp16 partial sums far from overflow.
+# GeForce runs fp16-accumulate tensor MMAs at full rate.
 _FAST_ACCUM = os.environ.get("JOYOMNI_FP8_FAST_ACCUM", "").strip().lower() in {
     "1", "true", "yes", "on"
 }
-_FA_DIV = 16.0
+_FA_QMAX_A = 7.0
+_FA_QMAX_W = 14.0
+_FA_PROMOTE = 4
+assert _FA_PROMOTE * 128 * _FA_QMAX_A * _FA_QMAX_W <= 65504.0
 
 if _FAST_ACCUM:
     import triton
@@ -30,7 +29,8 @@ if _FAST_ACCUM:
                       sam, sak, sbk, sbn, scm, scn,
                       HAS_BIAS: tl.constexpr,
                       BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
-                      GROUP: tl.constexpr):
+                      GROUP: tl.constexpr, PROMOTE: tl.constexpr):
+        # Promote every 512 elements of K: 512 * 7 * 14 = 50,176 < fp16 max.
         pid = tl.program_id(0)
         grid_m = tl.cdiv(M, BM)
         grid_n = tl.cdiv(N, BN)
@@ -44,19 +44,18 @@ if _FAST_ACCUM:
         rk = tl.arange(0, BK)
         A_ptr = A + (rm[:, None] * sam + rk[None, :] * sak)
         B_ptr = B + (rk[:, None] * sbk + rn[None, :] * sbn)
-        # Two-level accumulation: each BK-tile runs the full-rate fp16-
-        # accumulate MMA, then is promoted into an fp32 running sum. A
-        # single fp16 accumulator across all of K overflows on real
-        # activations (GELU outputs are all-positive, so against a same-
-        # sign weight column the partial sum grows linearly in K).
         acc = tl.zeros((BM, BN), dtype=tl.float32)
+        part = tl.zeros((BM, BN), dtype=tl.float16)
         for k in range(0, tl.cdiv(K, BK)):
             a = tl.load(A_ptr, mask=(rm[:, None] < M) & ((rk[None, :] + k * BK) < K), other=0.0)
             b = tl.load(B_ptr, mask=((rk[:, None] + k * BK) < K) & (rn[None, :] < N), other=0.0)
-            part = tl.dot(a, b, out_dtype=tl.float16)
-            acc += part.to(tl.float32)
+            part = tl.dot(a, b, part, out_dtype=tl.float16)
+            if (k + 1) % PROMOTE == 0:
+                acc += part.to(tl.float32)
+                part = tl.zeros((BM, BN), dtype=tl.float16)
             A_ptr += BK * sak
             B_ptr += BK * sbk
+        acc += part.to(tl.float32)
         xs = tl.load(XS + rm, mask=rm < M, other=0.0)
         ws = tl.load(WS + rn, mask=rn < N, other=0.0)
         out = acc * xs[:, None] * ws[None, :]
@@ -68,10 +67,7 @@ if _FAST_ACCUM:
 
     @triton.jit
     def _fa_quant_kernel(X, XQ, XS, M, K, sxm, sxk,
-                         BLOCK: tl.constexpr, DIV: tl.constexpr):
-        # Per-token e4m3 quant into 1/DIV of the fp8 range: |q| <= 448/DIV.
-        # (sgl_per_token_quant_fp8 always fills the full +-448 range, which
-        # would overflow the fp16 accumulator in the fast-accum GEMM.)
+                         BLOCK: tl.constexpr, QMAX: tl.constexpr):
         row = tl.program_id(0)
         offs = tl.arange(0, BLOCK)
         m = tl.zeros((BLOCK,), dtype=tl.float32)
@@ -80,7 +76,7 @@ if _FAST_ACCUM:
             x = tl.load(X + row * sxm + idx * sxk, mask=idx < K, other=0.0).to(tl.float32)
             m = tl.maximum(m, tl.abs(x))
         amax = tl.max(m, axis=0)
-        scale = tl.maximum(amax, 1e-8) / (448.0 / DIV)
+        scale = tl.maximum(amax, 1e-8) / QMAX
         tl.store(XS + row, scale)
         inv = 1.0 / scale
         for k0 in range(0, tl.cdiv(K, BLOCK)):
@@ -101,9 +97,7 @@ def _quantize_weight_per_channel(w_bf16: torch.Tensor):
     w_kn = w_bf16.t().contiguous()
     K, N = w_kn.shape
     absmax = w_kn.abs().amax(dim=0).to(torch.float32).clamp_min(1e-8)
-    # Fast-accum: 1/16-range weights (exponent shift only; the larger scale
-    # keeps dequantization exact).
-    scale = absmax / (FP8_MAX / _FA_DIV) if _FAST_ACCUM else absmax / FP8_MAX
+    scale = absmax / (_FA_QMAX_W if _FAST_ACCUM else FP8_MAX)
     w_q_rm = (w_kn.float() / scale.unsqueeze(0)).clamp(-FP8_MAX, FP8_MAX).to(FP8_DTYPE)
     w_q_cm = w_q_rm.t().contiguous().t()
     assert w_q_cm.shape == (K, N) and w_q_cm.stride() == (1, K)
@@ -145,7 +139,7 @@ class Fp8Linear(nn.Module):
         if _FAST_ACCUM:
             _fa_quant_kernel[(M,)](x_2d, x_q, x_scale, M, K,
                                    x_2d.stride(0), x_2d.stride(1),
-                                   BLOCK=1024, DIV=_FA_DIV, num_warps=4)
+                                   BLOCK=1024, QMAX=_FA_QMAX_A, num_warps=4)
             N = self.out_features
             y = torch.empty((M, N), device=x_2d.device, dtype=self.out_dtype)
             xs_eff = x_scale.view(-1)
@@ -159,7 +153,7 @@ class Fp8Linear(nn.Module):
                 self.weight_fp8.stride(0), self.weight_fp8.stride(1),
                 y.stride(0), y.stride(1),
                 HAS_BIAS=self.bias is not None,
-                BM=bm, BN=bn, BK=128, GROUP=8,
+                BM=bm, BN=bn, BK=128, GROUP=8, PROMOTE=_FA_PROMOTE,
                 num_warps=warps, num_stages=stages,
             )
             return y.reshape(*orig_shape[:-1], self.out_features)
