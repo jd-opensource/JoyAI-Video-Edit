@@ -16,8 +16,11 @@ JoyAI-Video-Edit is a real-time, instruction-guided video editing system for ope
 
 The system combines an MLLM-based condition encoder, a causal video VAE, and a 16B-parameter multimodal diffusion transformer. It is trained and deployed as an autoregressive diffusion editor, then accelerated with aligned autoregressive distribution matching distillation, long-horizon optimization, bounded KV-state inference, and deployment-oriented scheduling to sustain high-throughput 720p editing while reducing train-inference mismatch and accumulated temporal drift.
 
+https://github.com/user-attachments/assets/9faeb803-b52f-45ef-88c7-6fc92d569ba9
+
 ## 🔥🔥🔥 News!!
 
+- 2026.11.09: 🎉 We release **JoyAI-Video-Edit-1.1**, with improved reference-image-guided character replacement while preserving source motion. Download the **[new DiT weights](https://huggingface.co/jdopensource/JoyAI-Video-Edit/blob/main/dit/joyai_video_edit_dit_1101_face%2B%2B.pth)**.
 - 2026.10.09: 🎉 We open-source our **[example training scripts](training/README.md)** and release **[LongV2VBench](https://huggingface.co/datasets/EasonXiao-888/LongV2VBench)** for long-form video-to-video editing evaluation.
 - 2026.08.24: 🎉 Consumer GPU support landed — real-time streaming video editing on a single GeForce RTX 5090 (32 GB): 840 × 480 @ 24 FPS. **[Deployment Guide](DEPLOYMENT.md)**
 - 2026.08.15: 🎉 Live demo released — real-time streaming video editing on a single RTX PRO 6000 (Blackwell) GPU: 840 × 480 @ 24 FPS or 720p @ 16 FPS. **[Try HuggingFace Demo](https://huggingface.co/spaces/wxDai/joyai-video-edit)**
@@ -104,12 +107,12 @@ https://github.com/user-attachments/assets/e887d087-af71-4de1-b5d3-bbfbd32922d8
 
 ## 📦 Model Download
 
-Download the released JoyAI-Video-Edit weights from [Hugging Face](https://huggingface.co/jdopensource/JoyAI-Video-Edit), then place them under:
+Download the **JoyAI-Video-Edit-1.1** weights from [Hugging Face](https://huggingface.co/jdopensource/JoyAI-Video-Edit), then place them under:
 
 ```text
 deploy/deps/checkpoints/JoyAI-Video-Edit/
 |-- dit/
-|   `-- joyai_video_edit_dit_0811.pth
+|   `-- joyai_video_edit_dit_1101_face++.pth
 `-- vae/
     |-- config.json
     `-- diffusion_pytorch_model.safetensors
