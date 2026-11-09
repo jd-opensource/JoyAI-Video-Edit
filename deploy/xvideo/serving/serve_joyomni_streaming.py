@@ -30,6 +30,7 @@ import httpx
 import uvicorn
 
 from xvideo.serving.pe import pe_available, pe_model_name
+from xvideo.serving.reference_images import REFERENCE_ROOT, router as reference_router
 from xvideo.serving.joyomni_streaming import (
     JoyOmniRuntime,
     StreamingSettings,
@@ -737,43 +738,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
     app.state.ws_debug = {}
 
     app.state.session_gate = SessionGate()
-    reference_root = REPO_ROOT / "rv2v_reference"
-    legacy_references = {
-        "hat": "4e481f7a-2443-4935-a841-af6113cc4236.png",
-        "scarf": "5e178546-3ebf-40df-bb86-01613dd96c3b.png",
-        "pink_tee": "1c182f2f-32cf-4825-904e-64c69aed2e31.png",
-        "orange_glasses": "486b9561-e73d-45ca-bb2d-2a47998a0a73.png",
-    }
-
-    def reference_response(image_id: str, request: Request, thumbnail: bool = False):
-        if image_id in legacy_references and not thumbnail:
-            path = reference_root / legacy_references[image_id]
-        else:
-            try:
-                if str(uuid.UUID(image_id)) != image_id:
-                    raise ValueError
-            except ValueError:
-                raise HTTPException(status_code=404, detail="Reference image not found")
-            directory = reference_root / ("thumbnails" if thumbnail else "ip")
-            path = directory / f"{image_id}{'.jpg' if thumbnail else '.png'}"
-            if path.resolve().parent != directory.resolve():
-                raise HTTPException(status_code=404, detail="Reference image not found")
-        if not path.is_file():
-            raise HTTPException(status_code=404, detail="Reference image not found")
-        stat = path.stat()
-        etag = f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
-        headers = {"Cache-Control": "public, max-age=86400", "ETag": etag}
-        if request.headers.get("if-none-match") in (etag, "*"):
-            return Response(status_code=304, headers=headers)
-        return FileResponse(path, media_type="image/jpeg" if thumbnail else "image/png", headers=headers)
-
-    @app.get("/reference-images/{image_id}/thumbnail")
-    def reference_thumbnail(image_id: str, request: Request):
-        return reference_response(image_id, request, thumbnail=True)
-
-    @app.get("/reference-images/{image_id}")
-    def reference_image(image_id: str, request: Request):
-        return reference_response(image_id, request)
+    app.include_router(reference_router)
 
     @app.get("/")
     def index() -> HTMLResponse:
@@ -872,7 +837,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             if reference_id is not None:
                 if ref_image is not None or str(uuid.UUID(reference_id)) != reference_id:
                     raise ValueError("Supply one canonical reference ID or ref_image")
-                path = reference_root / "ip" / (reference_id + ".png")
+                path = REFERENCE_ROOT / "ip" / (reference_id + ".png")
                 with Image.open(path) as image:
                     ref_image = image.convert("RGB")
             frame = _decode_ref_image(payload.get("source_frame"))

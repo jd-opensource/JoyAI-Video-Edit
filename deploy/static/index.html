@@ -124,6 +124,13 @@
     .chip.chip-ref::before { content: "📎 "; }
     .chip.chip-ref:hover { border-color: var(--accent); color: #8a5a12; }
     .chip.chip-ref.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+    .chip.chip-featured { background: #fff0e8; border-color: var(--accent); color: #a43b20; font-weight: 750; box-shadow: 0 0 0 3px rgba(242,100,63,.12); }
+    .chip.chip-featured::before { content: "✦ "; }
+    .chip.chip-featured::after { content: "1.1"; display: inline-block; margin-left: 7px; padding: 2px 5px; border-radius: 5px; background: var(--accent); color: #fff; font-size: 10px; line-height: 1; vertical-align: middle; }
+    .chip.chip-featured:hover { color: #a43b20; box-shadow: 0 0 0 3px rgba(242,100,63,.22); }
+    .chip.chip-featured.active { background: var(--accent); color: #fff; }
+    .chip.chip-featured.active::after { background: #fff; color: #a43b20; }
     .cards-pop { display: none; position: absolute; left: 14px; right: 14px; bottom: calc(100% + 8px); z-index: 20; padding: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); }
     .cards-pop.open { display: block; }
     .cards-pop .pop-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; max-height: 46vh; overflow: auto; }
@@ -2243,6 +2250,7 @@ function renderPromptCases() {
     const chip = document.createElement("button");
     chip.type = "button";
     chip.className = "chip";
+    if (group.key === "replace_person") chip.classList.add("chip-featured");
     if (group.cases.some((c) => c.ref || c.ref_url)) chip.classList.add("chip-ref");
     chip.textContent = sceneField(group, "label");
     chip.addEventListener("click", () => openCategory(group, chip));
@@ -2302,7 +2310,7 @@ const REFERENCE_ROWS = [
 })));
 PROMPT_GROUPS.unshift({
   key: "replace_person",
-  label: "人物替换", label_en: "Person Replacement",
+  label: "角色替换", label_en: "Character Replacement",
   rows: REFERENCE_ROWS,
   cases: REFERENCE_ROWS.flat(),
 });
