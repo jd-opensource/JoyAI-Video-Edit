@@ -22,6 +22,8 @@ def load_text_encoder(
         local_files_only=True,
         attn_implementation="sdpa",
     )
+    # Only hidden states are used; drop the unused vocabulary head before placement/offload.
+    model.lm_head = torch.nn.Identity()
     if cpu_offload:
         # The 7B text encoder runs only at session start / KV reset, so it stays
         # in CPU RAM and streams through the GPU during encode_prompt (~0 resident).
