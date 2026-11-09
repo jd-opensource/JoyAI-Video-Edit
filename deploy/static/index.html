@@ -815,8 +815,9 @@ function readRefImageDataUrl() {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
-      refImagePreviewDataUrl = String(reader.result || "");
-      resolve(refImagePreviewDataUrl);
+      const dataUrl = String(reader.result || "");
+      if (el.files && el.files[0] === file) refImagePreviewDataUrl = dataUrl;
+      resolve(dataUrl);
     };
     reader.onerror = () => reject(reader.error || new Error("failed to read ref image"));
     reader.readAsDataURL(file);
@@ -824,6 +825,9 @@ function readRefImageDataUrl() {
 }
 
 async function handleRefImageChange() {
+  ++referenceSelectionToken;
+  if (referenceSelectionController) referenceSelectionController.abort();
+  hideOutputToast();
   injectedRefImageDataUrl = null;
   if (!refImageSelected()) {
     refImagePreviewDataUrl = null;

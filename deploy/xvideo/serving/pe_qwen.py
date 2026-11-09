@@ -1,117 +1,47 @@
-import concurrent.futures
-import json
-import re
+"""Local Qwen3.6-27B GPTQ PE with Marlin and CUDA Graph decoding."""
+
 import time
+import types
 from pathlib import Path
 
 import torch
-from safetensors.torch import load_file
-from transformers import (
-    AutoConfig,
-    AutoProcessor,
-    GenerationConfig,
-    Qwen3_5MoeForConditionalGeneration,
-)
-
-from .pe_qwen_kernels import Int4Experts, prepare_kernels
+from transformers import AutoConfig, AutoProcessor, StaticCache
 
 
-def load_model(path):
-    path = Path(path)
+def _gptq_backend():
+    # GPTQModel 6.0.3 needs these aliases with Transformers 5.20.2.
+    import huggingface_hub as hub
+    from transformers.utils import hub as transformers_hub
+
+    transformers_hub.create_repo = hub.create_repo
+    transformers_hub.list_repo_tree = hub.list_repo_tree
+    from gptqmodel import BACKEND, GPTQModel
+
+    return GPTQModel, BACKEND
+
+
+def load_model(path, device="cuda"):
     start = time.perf_counter()
+    path = Path(path)
     config = AutoConfig.from_pretrained(path, local_files_only=True)
-    q = config.quantization_config
-    assert (
-        q["bits"] == 4 and q["group_size"] == 128 and q["sym"] and (not q["desc_act"])
+    if config.model_type != "qwen3_5" or config.text_config.num_hidden_layers != 64:
+        raise ValueError("Local PE requires the dense Qwen3.6-27B GPTQ checkpoint")
+    GPTQModel, BACKEND = _gptq_backend()
+    wrapped = GPTQModel.load(
+        str(path), device=device, backend=BACKEND.MARLIN,
+        torch_dtype=torch.bfloat16, attn_implementation="sdpa", trust_remote_code=False,
     )
-    del config.quantization_config
-    with torch.device("meta"):
-        model = Qwen3_5MoeForConditionalGeneration(config)
-        for layer in model.model.language_model.layers:
-            layer.mlp.experts = Int4Experts(config.text_config)
-    model.set_attn_implementation("sdpa")
-    model.to(dtype=torch.bfloat16).to_empty(device="cpu")
-    state = model.state_dict()
-    loaded = set()
-    seen = set()
-    pattern = re.compile(
-        "model.language_model.layers\\.(\\d+)\\.mlp.experts\\.(\\d+)\\.(gate_proj|up_proj|down_proj)\\.(qweight|scales|qzeros|g_idx)$"
+    model = wrapped.model.eval().requires_grad_(False)
+    quantized = sum(
+        "Marlin" in type(module).__name__ and hasattr(module, "qweight")
+        for module in model.modules()
     )
-
-    def read(shard):
-        tensors = load_file(str(shard), device="cpu")
-        for key, tensor in tensors.items():
-            match = pattern.fullmatch(key)
-            if match:
-                (layer, expert, proj, kind) = match.groups()
-                if kind in ("qzeros", "g_idx"):
-                    if kind == "g_idx":
-                        assert torch.equal(
-                            tensor,
-                            torch.arange(tensor.numel(), dtype=tensor.dtype) // 128,
-                        )
-                    else:
-                        assert bool((tensor == -2004318072).all()), (
-                            key,
-                            tensor.flatten()[:8],
-                        )
-                    continue
-                module = model.model.language_model.layers[int(layer)].mlp.experts
-                target = getattr(
-                    module,
-                    ("down" if proj == "down_proj" else "gate_up")
-                    + ("_q" if kind == "qweight" else "_s"),
-                )[int(expert)]
-                if proj != "down_proj":
-                    target = target[0:512] if proj == "gate_proj" else target[512:1024]
-                target.copy_(tensor.T)
-                seen.add((layer, expert, proj, kind))
-            else:
-                if key.startswith("mtp.") or ".mtp." in key:
-                    continue
-                if key not in state:
-                    raise KeyError(key)
-                state[key].copy_(tensor)
-                loaded.add(key)
-        print("SHARD", shard.name, flush=True)
-
-    files = sorted(
-        set(
-            json.loads((path / "model.safetensors.index.json").read_text())[
-                "weight_map"
-            ].values()
-        )
-    )
-    with concurrent.futures.ThreadPoolExecutor(8) as pool:
-        list(pool.map(read, [path / f for f in files]))
-    missing = [k for k in state if k not in loaded and ".mlp.experts." not in k]
-    assert not missing, (len(missing), missing[:8])
-    assert len(seen) == 40 * 256 * 3 * 2, len(seen)
-    model = model.to(dtype=torch.bfloat16).eval().requires_grad_(False)
-    for module in model.modules():
-        init = getattr(
-            module,
-            "compute_axial_rope_parameters",
-            getattr(module, "compute_default_rope_parameters", None),
-        )
-        if init is not None:
-            (inv, scaling) = init(module.config, device=torch.device("cpu"))
-            module.inv_freq = inv
-            module.original_inv_freq = inv.clone()
-            module.attention_scaling = scaling
+    if quantized != 400:
+        raise ValueError(f"Expected 400 Marlin INT4 modules, got {quantized}")
     processor = AutoProcessor.from_pretrained(path, local_files_only=True)
-    model.generation_config = GenerationConfig.from_pretrained(
-        path, local_files_only=True
-    )
-    prepare_kernels()
-    print(
-        f"[pe] Qwen INT4 CPU preparation: {time.perf_counter() - start:.2f}s",
-        flush=True,
-    )
-    return (model, processor)
-
-
-from transformers import StaticCache
+    print(f"[pe] Qwen3.6-27B Marlin INT4: {quantized} modules, "
+          f"loaded in {time.perf_counter() - start:.2f}s", flush=True)
+    return model, processor
 
 
 class _GraphDecoder:
@@ -120,6 +50,8 @@ class _GraphDecoder:
         self.capacity = 4096
         self.cache = StaticCache(config=model.config, max_cache_len=self.capacity)
         self.graph = None
+        eos = model.generation_config.eos_token_id
+        self.eos_token_ids = frozenset([eos] if isinstance(eos, int) else eos)
 
     def copy_cache(self, source, length):
         for dst, src in zip(self.cache.layers, source.layers):
@@ -173,7 +105,6 @@ class _GraphDecoder:
         first = out.logits[:, -1].argmax(-1).view(1, 1)
         length = inputs.input_ids.shape[1]
         delta = model.model.rope_deltas.clone()
-        self.copy_cache(out.past_key_values, length)
         torch.cuda.synchronize()
         prefill = time.perf_counter() - started
         capture = 0
@@ -189,6 +120,7 @@ class _GraphDecoder:
 
         if self.graph is None:
             started_capture = time.perf_counter()
+            self.copy_cache(out.past_key_values, length)
             self.token = first.clone()
             self.pos = torch.tensor([length], device="cuda")
             self.rope = positions().clone()
@@ -213,9 +145,7 @@ class _GraphDecoder:
         self.rope.copy_(positions())
         del out
         tokens = [first.item()]
-        eos = model.generation_config.eos_token_id
-        eos = [eos] if isinstance(eos, int) else eos
-        while tokens[-1] not in eos and len(tokens) < limit:
+        while tokens[-1] not in self.eos_token_ids and len(tokens) < limit:
             if should_stop():
                 raise TimeoutError("PE generation cancelled")
             self.graph.replay()
@@ -223,8 +153,8 @@ class _GraphDecoder:
         return (tokens, dict(prefill_seconds=prefill, capture_seconds=capture))
 
 
-MODEL_ID = "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4"
-MODEL_REVISION = "3af5ca2972faf6de1fd6f4efc4d8d319ca751e8b"
+MODEL_ID = "btbtyler09/Qwen3.6-27B-GPTQ-4bit"
+MODEL_REVISION = "bcfe8a7ec20eec6ce67ded4669819ae77e73af3a"
 
 
 def _linear_patch(self, x):
@@ -237,13 +167,10 @@ def _linear_patch(self, x):
 
 class QwenRuntime:
     def __init__(self, path, device="cuda"):
-        import types
-
-        (self.model, self.processor) = load_model(path)
+        (self.model, self.processor) = load_model(path, device=device)
         self.model.model.visual.patch_embed.forward = types.MethodType(
             _linear_patch, self.model.model.visual.patch_embed
         )
-        self.model.to(device)
         self.decoder = None
 
     def generate(self, system, text, images, should_stop):
@@ -265,11 +192,9 @@ class QwenRuntime:
         if self.decoder is None:
             self.decoder = _GraphDecoder(self.model)
         # CUDA RNG graph state is shared with video; keep it outside inference mode.
-        with torch.no_grad():
+        with torch.cuda.device(self.model.device), torch.no_grad():
             (tokens, timings) = self.decoder.generate(inputs, 384, should_stop)
-        eos = self.model.generation_config.eos_token_id
-        eos = [eos] if isinstance(eos, int) else eos
-        if tokens[-1] not in eos:
+        if tokens[-1] not in self.decoder.eos_token_ids:
             raise ValueError("Qwen PE output was truncated")
         text = self.processor.tokenizer.decode(tokens, skip_special_tokens=True).strip()
         if not text or "<think" in text.lower() or "</think" in text.lower():

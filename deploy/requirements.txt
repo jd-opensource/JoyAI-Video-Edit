@@ -3,8 +3,8 @@ torch==2.9.1+cu128
 torchvision==0.24.1+cu128
 transformers==5.20.2
 peft==0.21.2
-accelerate==1.10.1
-diffusers==0.36.0
+accelerate==1.15.0
+diffusers==0.37.1
 einops==0.8.2
 numpy==2.2.6
 pillow==12.2.0
@@ -18,3 +18,18 @@ ninja==1.13.0
 websockets==16.0
 httpx==0.28.1
 loguru==0.7.3
+
+# Local Qwen3.6-27B GPTQ PE (same environment as video inference).
+GPTQModel @ https://github.com/ModelCloud/GPTQModel/releases/download/v6.0.3/gptqmodel-6.0.3%2Bcu128torch2.9-cp310-cp310-linux_x86_64.whl
+kernels==0.17.2
+defuser==0.0.18
+device-smi==0.5.2
+logbar==0.4.1
+tokenicer==0.0.12
+pypcre==0.2.14
+threadpoolctl==3.6.0
+datasets==3.6.0
+pyarrow==21.0.0
+dill==0.3.8
+multiprocess==0.70.16
+torchao==0.16.0

@@ -142,6 +142,10 @@ Then install the attention and kernel dependencies:
 > FP8 kernel; the DiT then runs those Linears in bf16. SageAttention is
 > independent of this — if absent, attention uses the SDPA/cuDNN path.
 
+Video inference and Qwen3.6-27B PE use the same `joyai-video-edit` environment.
+Install their packages with `deploy/requirements.txt`. For a different Python,
+CUDA or Torch version, choose the matching GPTQModel wheel.
+
 Verify the key runtime imports:
 
 ```bash
@@ -161,7 +165,7 @@ except Exception as e:
 try:
     import joyomni_ops; print("joyomni_ops: OK | has_fp8 =", joyomni_ops.has_fp8())
 except Exception as e:
-    print("joyomni_ops: MISSING ->", e, "(build deploy/joyomni_ops; set JOYOMNI_FP8_IMG=0 to skip FP8)")
+    print("joyomni_ops: MISSING ->", e, "(build deploy/joyomni_ops; set JOYOMNI_FP8_IMG=0 JOYOMNI_FP8_TXT=0 to skip FP8)")
 PY
 ```
 
@@ -170,7 +174,8 @@ PY
 ## 3. Fetch the weights
 
 Video-model and local PE weights live under `deploy/deps/checkpoints/`.
-The Qwen PE checkpoint requires about 22.8 GiB in addition to the video weights.
+The local Qwen3.6-27B INT4 PE checkpoint has about 20.4 GiB of weight shards
+in addition to the video weights. Disk size is not the resident GPU-memory requirement.
 Create the directory and download each dependency.
 
 ```bash
@@ -205,17 +210,17 @@ hf download XiaomiMiMo/MiMo-VL-7B-RL-2508 \
   --local-dir deploy/deps/checkpoints/MiMo-VL-7B-RL-2508
 ```
 
-**3c. Local prompt enhancement** — Qwen3.5-35B-A3B GPTQ INT4:
+**3c. Local prompt enhancement** — Qwen3.6-27B GPTQ INT4:
 
 ```bash
-hf download Qwen/Qwen3.5-35B-A3B-GPTQ-Int4 \
-  --revision 3af5ca2972faf6de1fd6f4efc4d8d319ca751e8b \
-  --local-dir deploy/deps/checkpoints/Qwen3.5-35B-A3B-GPTQ-Int4
+hf download btbtyler09/Qwen3.6-27B-GPTQ-4bit \
+  --revision bcfe8a7ec20eec6ce67ded4669819ae77e73af3a \
+  --local-dir deploy/deps/checkpoints/Qwen3.6-27B-GPTQ-Int4-FOEM
 ```
 
-`deploy/run_server.sh` defaults to `JOYOMNI_PE_BACKEND=qwen` and loads this
-local directory. Override it with `JOYOMNI_PE_CKPT` when storing the checkpoint
-elsewhere.
+`deploy/run_server.sh` defaults to `JOYOMNI_PE_BACKEND=qwen` and this local
+directory. Override `JOYOMNI_PE_CKPT` to store the same checkpoint elsewhere.
+The checkpoint is a community GPTQ INT4 quantization.
 
 **3d. ONNX detectors** (*optional*):
 
@@ -271,7 +276,7 @@ deploy/deps/checkpoints/
 │   ├── dit/joyai_video_edit_dit_1101_face++.pth
 │   └── vae/{config.json, diffusion_pytorch_model.safetensors}
 ├── MiMo-VL-7B-RL-2508/
-├── Qwen3.5-35B-A3B-GPTQ-Int4/
+├── Qwen3.6-27B-GPTQ-Int4-FOEM/      # local PE
 ├── face_detection_yunet_2023mar.onnx
 └── yolov8n.onnx
 ```
@@ -346,6 +351,6 @@ Key variables:
 | `JOYOMNI_CKPT_ROOT` | override the checkpoints dir (default `deploy/deps/checkpoints`). |
 | `JOYOMNI_DIT_CKPT` / `JOYOMNI_VAE_CKPT` / `JOYOMNI_TEXT_ENCODER_CKPT` / `JOYOMNI_FACE_ONNX` / `JOYOMNI_PERSON_ONNX` | override individual weight paths (default: derived from `JOYOMNI_CKPT_ROOT`). |
 | `JOYOMNI_RECORD_DIR` | recording output dir. |
-| `JOYOMNI_PE_BACKEND` | `qwen` (default): local Qwen INT4 PE. `api`: external prompt-enhancement endpoint. `none`: disable PE without loading Qwen. |
-| `JOYOMNI_PE_CKPT` | Local Qwen directory (default `JOYOMNI_CKPT_ROOT/Qwen3.5-35B-A3B-GPTQ-Int4`). |
+| `JOYOMNI_PE_BACKEND` | `qwen` (default): local Qwen3.6-27B Marlin INT4 PE. `api`: external prompt-enhancement endpoint. `none`: disable PE without loading Qwen. |
+| `JOYOMNI_PE_CKPT` | Local Qwen directory (default `JOYOMNI_CKPT_ROOT/Qwen3.6-27B-GPTQ-Int4-FOEM`). |
 | `PE_MODEL` / `OPENAI_BASE_URL` / `OPENAI_API_KEY` | Used with `JOYOMNI_PE_BACKEND=api`. Prompt-enhancement endpoint: OpenAI-compatible, or Anthropic-protocol when the base URL contains `/anthropic` (key sent as `Authorization: Bearer`). If unset, the server falls back to the raw user prompt. |

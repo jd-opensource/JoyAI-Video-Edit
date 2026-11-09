@@ -26,6 +26,7 @@ if str(REPO_ROOT) not in sys.path:
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from PIL import Image
+import httpx
 import uvicorn
 
 from xvideo.serving.pe import pe_available, pe_model_name
@@ -53,6 +54,9 @@ class SessionGate:
         self._order.append(ticket)
         self._events[ticket] = asyncio.Event()
         return ticket
+
+    def try_enqueue(self) -> int | None:
+        return None if self._order else self.enqueue()
 
     def position(self, ticket: int) -> int:
         return self._order.index(ticket) if ticket in self._order else -1
@@ -440,17 +444,21 @@ async def _enhance_prompt(
     backend: str = "api",
     pipeline=None,
     inference_lock=None,
+    task_type: str | None = None,
+    pe_module=None,
+    raise_on_error: bool = False,
 ) -> dict[str, Any]:
     started = time.perf_counter()
-    task_type = "rv2v" if ref_image is not None else "v2v"
+    task_type = task_type or ("rv2v" if ref_image is not None else "v2v")
     enhanced_prompt = raw_prompt
     error = None
     model = pe_model_name(backend, pe_model)
     try:
-        from xvideo.serving.pe import QwenPromptEnhancer, PromptEnhancer
+        if pe_module is None:
+            from xvideo.serving import pe as pe_module
 
-        enhancer = (QwenPromptEnhancer(pipeline, inference_lock) if backend == "qwen"
-                    else PromptEnhancer(model=pe_model))
+        enhancer = (pe_module.QwenPromptEnhancer(pipeline, inference_lock) if backend == "qwen"
+                    else pe_module.PromptEnhancer(model=pe_model))
         model = enhancer.model or model
         enhanced = await enhancer.enhance(
             task_type,
@@ -462,6 +470,8 @@ async def _enhance_prompt(
         if isinstance(enhanced, str) and enhanced.strip():
             enhanced_prompt = enhanced.strip()
     except Exception as exc:
+        if raise_on_error:
+            raise
         error = repr(exc)
     report = {
         "enabled": True,
@@ -845,9 +855,6 @@ def create_app(args: argparse.Namespace) -> FastAPI:
     @app.post("/pe/enhance")
     async def enhance_only(request: Request) -> JSONResponse:
         """Expand a prompt using existing PE weights; never create a video session."""
-        runtime = app.state.runtime
-        if runtime is None or app.state.runtime_error is not None:
-            raise HTTPException(status_code=503, detail="Runtime is not ready")
         if not pe_available(args.pe_backend):
             raise HTTPException(status_code=503, detail="PE backend is unavailable")
         try:
@@ -875,29 +882,34 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         except (ValueError, TypeError, AttributeError, OSError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-        pe_module, digest = _load_current_pe_module()
-        expected = payload.get("expected_pe_sha256")
-        if expected is not None and expected != digest:
-            raise HTTPException(status_code=409, detail="PE version changed")
-        started = time.perf_counter()
-        enhancer = (pe_module.QwenPromptEnhancer(runtime.pipeline, app.state.inference_lock)
-                    if args.pe_backend == "qwen"
-                    else pe_module.PromptEnhancer(model=args.pe_model))
-        enhanced = await enhancer.enhance(
-            task_type, raw_prompt, video=[frame] if frame is not None else None,
-            ref_image=ref_image, timeout=timeout,
-        )
-        report = dict(
-            enabled=True, backend=args.pe_backend, task_type=task_type,
-            model=enhancer.model, raw_prompt=raw_prompt, enhanced_prompt=enhanced,
-            elapsed_s=time.perf_counter() - started, fallback=enhanced == raw_prompt,
-            cached=False, pe_sha256=digest, pe_only=True,
-        )
-        if args.pe_backend == "qwen":
-            report.update(template=enhancer.template,
-                          decoder=getattr(enhancer, "decoder", "eager"),
-                          timings=enhancer.timings)
-        return JSONResponse(report)
+        gate = app.state.session_gate
+        ticket = gate.try_enqueue()
+        if ticket is None:
+            raise HTTPException(status_code=409, detail="Video service is busy")
+        try:
+            runtime = app.state.runtime
+            if runtime is None or app.state.runtime_error is not None:
+                raise HTTPException(status_code=503, detail="Runtime is not ready")
+            pe_module, digest = _load_current_pe_module()
+            expected = payload.get("expected_pe_sha256")
+            if expected is not None and expected != digest:
+                raise HTTPException(status_code=409, detail="PE version changed")
+            report = await _enhance_prompt(
+                raw_prompt=raw_prompt, pe_frame=frame, pe_model=args.pe_model,
+                timeout=timeout, ref_image=ref_image, backend=args.pe_backend,
+                pipeline=runtime.pipeline, inference_lock=app.state.inference_lock,
+                task_type=task_type, pe_module=pe_module, raise_on_error=True,
+            )
+            report.update(pe_sha256=digest, pe_only=True)
+            return JSONResponse(report)
+        except HTTPException:
+            raise
+        except (asyncio.TimeoutError, TimeoutError, httpx.TimeoutException) as exc:
+            raise HTTPException(status_code=504, detail=f"PE timed out: {exc}") from exc
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"PE backend failed: {exc}") from exc
+        finally:
+            gate.release(ticket)
 
     @app.post("/load")
     def load() -> JSONResponse:
@@ -2065,6 +2077,9 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                     finally:
                         app.state.inference_lock.release()
 
+                frame_timeout = max(0.1, float(
+                    args.push_frame_timeout_s if session.initialized else args.session_init_timeout_s
+                ))
                 try:
                     capacity_deadline = time.monotonic() + max(0.1, float(args.push_frame_timeout_s))
                     while lossless_mode and session_max_inflight and session.inflight_chunks() >= session_max_inflight:
@@ -2074,10 +2089,10 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                         await asyncio.sleep(0.01)
                     chunk_results = await _run_work(
                         _run_frame,
-                        timeout=max(0.1, float(args.push_frame_timeout_s)),
+                        timeout=frame_timeout,
                     )
                 except asyncio.TimeoutError:
-                    msg = f"push_frame timeout after {args.push_frame_timeout_s:.1f}s"
+                    msg = f"push_frame timeout after {frame_timeout:.1f}s"
                     print(f"#####[WS-GUARD] {msg}", flush=True)
                     await _send_json({"type": "error", "message": msg})
                     break
@@ -2127,7 +2142,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                                             if rec_input is not None:
                                                 rec_input.submit(_anchor, _anchor_meta["t_capture_ms"])
                                             _sess.push_frame(_anchor, frame_meta=_anchor_meta, drain_results=False)
-                                await _run_work(_swap, timeout=max(0.1, float(args.push_frame_timeout_s)))
+                                await _run_work(_swap, timeout=max(0.1, float(args.session_init_timeout_s)))
                                 pe_report = report
                                 if _record_anchor:
                                     edit_frames += 1
@@ -2264,6 +2279,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--freeze-kv-on-static", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--static-diff-thresh", type=float, default=0.5)
     parser.add_argument("--preload", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--session-init-timeout-s", type=float, default=120.0, help="Timeout for session initialization, with or without a reference image.")
     parser.add_argument("--push-frame-timeout-s", type=float, default=15.0, help="Timeout for frame submission or file-input backpressure; teardown must finish before model reuse.")
     parser.add_argument("--max-inflight-chunks", type=int, default=2, help="Limit chunks in flight: camera input drops excess frames, file input waits for capacity. 0 disables; overridable per session.")
     parser.add_argument("--session-close-timeout-s", type=float, default=5.0, help="Session cleanup timeout. If workers or GPU work remain active, reject new sessions until restart.")

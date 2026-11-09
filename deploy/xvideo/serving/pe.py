@@ -389,7 +389,7 @@ class PromptEnhancer:
             return user_prompt
 
 
-QWEN_MODEL = "Qwen3.5-35B-A3B-GPTQ-Int4"
+QWEN_MODEL = "Qwen3.6-27B-GPTQ-Int4-FOEM"
 
 
 def pe_available(backend):
