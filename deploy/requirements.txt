@@ -20,7 +20,6 @@ httpx==0.28.1
 loguru==0.7.3
 
 # Local Qwen3.6-27B GPTQ PE (same environment as video inference).
-GPTQModel @ https://github.com/ModelCloud/GPTQModel/releases/download/v6.0.3/gptqmodel-6.0.3%2Bcu128torch2.9-cp310-cp310-linux_x86_64.whl
 kernels==0.17.2
 defuser==0.0.18
 device-smi==0.5.2

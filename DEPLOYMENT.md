@@ -143,8 +143,27 @@ Then install the attention and kernel dependencies:
 > independent of this — if absent, attention uses the SDPA/cuDNN path.
 
 Video inference and Qwen3.6-27B PE use the same `joyai-video-edit` environment.
-Install their packages with `deploy/requirements.txt`. For a different Python,
-CUDA or Torch version, choose the matching GPTQModel wheel.
+Install the shared dependencies with `deploy/requirements.txt`, then install
+the GPTQModel wheel for your GPU, as with the attention dependencies above.
+Both wheels below match Linux x86_64 / Python 3.10 / Torch 2.9.1 cu128:
+
+- **B200 / sm100** — prebuilt Marlin wheel hosted in `wxDai/joyai-video-edit-wheels`:
+
+  ```bash
+  python -m pip install --index-url https://pypi.org/simple/ 'https://huggingface.co/datasets/wxDai/joyai-video-edit-wheels/resolve/bb453ac811107503302dc1bfb96bee7881b28766/b200/cu128/torch2.9/cp310/gptqmodel-6.0.3%2B6a65d69-cp310-cp310-linux_x86_64.whl#sha256=a87bf8facef6517829998bf64cdd3d2e001b318de10935fb79e6d9d3484949cb'
+  ```
+
+- **RTX PRO 6000 / RTX 5090 / sm120** — official GPTQModel wheel:
+
+  The RTX 5090 launch command below disables local PE; skip this wheel for that configuration.
+
+  ```bash
+  python -m pip install --index-url https://pypi.org/simple/ 'https://github.com/ModelCloud/GPTQModel/releases/download/v6.0.3/gptqmodel-6.0.3%2Bcu128torch2.9-cp310-cp310-linux_x86_64.whl'
+  ```
+
+These PE wheels do not require a source build. Use separate B200 and RTX PRO 6000
+environments when they share a filesystem. For a different Python, CUDA or Torch
+version, choose a matching GPTQModel wheel.
 
 Verify the key runtime imports:
 
