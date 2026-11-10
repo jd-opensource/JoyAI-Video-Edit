@@ -359,7 +359,7 @@ Key variables:
 | `JOYOMNI_CONDA_SH` / `JOYOMNI_CONDA_ENV` | conda `profile.d/conda.sh` + env name/prefix; the launcher activates it itself. Omit both to use the caller's python. |
 | `JOYOMNI_DEVICE` | CUDA device for all stages (default `cuda:0`). |
 | `JOYOMNI_HOST` / `JOYOMNI_PORT` | bind address (default `0.0.0.0:8080`). |
-| `JOYOMNI_WIDTH` / `JOYOMNI_HEIGHT` / `JOYOMNI_FPS` | Output resolution and frame rate (default `840` / `480` / `24` = 480p @ 24 FPS). Per-GPU commands above. |
+| `JOYOMNI_WIDTH` / `JOYOMNI_HEIGHT` / `JOYOMNI_FPS` | Resolution and client send/playback target FPS (default `840` / `480` / `24`). The FPS target paces the live camera; recording duration follows frame capture timestamps rather than this setting. Per-GPU commands above. |
 | `JOYOMNI_FP8_IMG` / `JOYOMNI_FP8_TXT` | FP8 image / text paths via `joyomni_ops` (default `1` / `1`). Set both `0` to run bf16 (e.g. a `JOYOMNI_OPS_NO_FP8=1` build). |
 | `JOYOMNI_CUDA_GRAPH` | capture the steady-state chunk loop into a CUDA graph (default `1`; the biggest single speedup). `0` runs eager. |
 | `JOYOMNI_FA4_ATTN` | Try FA4 first when installed (default `1`). Set `1` on B200; set `0` on RTX PRO 6000 / RTX 5090. HF ZeroGPU defaults to `0`. |
@@ -373,3 +373,24 @@ Key variables:
 | `JOYOMNI_PE_BACKEND` | `qwen` (default): local Qwen3.6-27B Marlin INT4 PE. `api`: external prompt-enhancement endpoint. `none`: disable PE without loading Qwen. |
 | `JOYOMNI_PE_CKPT` | Local Qwen directory (default `JOYOMNI_CKPT_ROOT/Qwen3.6-27B-GPTQ-Int4-FOEM`). |
 | `PE_MODEL` / `OPENAI_BASE_URL` / `OPENAI_API_KEY` | Used with `JOYOMNI_PE_BACKEND=api`. Prompt-enhancement endpoint: OpenAI-compatible, or Anthropic-protocol when the base URL contains `/anthropic` (key sent as `Authorization: Bearer`). If unset, the server falls back to the raw user prompt. |
+
+
+### Capture rate and backpressure
+
+`JOYOMNI_FPS` selects a client send/playback target, not a measured processing
+rate or a latency guarantee. Match the live camera rate to the configuration's
+sustainable throughput; sending frames faster than they can be processed does
+not make the model faster.
+
+The launcher forwards extra command-line arguments to the server. For example:
+
+```bash
+JOYOMNI_FPS=16 bash deploy/run_server.sh --max-inflight-chunks 2
+```
+
+`--max-inflight-chunks` defaults to `2` and limits chunks in flight. With a live
+camera, excess input frames are dropped when the limit is reached; file input
+waits for capacity instead. `0` disables this limit. The setting can also be
+overridden per session. It bounds queued work, but does not remove the model's
+own processing delay. Measure source-to-visible response separately from FPS
+and state whether timing includes network delivery and browser playback.
