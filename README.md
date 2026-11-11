@@ -102,8 +102,7 @@ https://github.com/user-attachments/assets/bca232c9-75df-46f9-b366-14cfa2651994
 
 **RV2V:** Put the coat/dress/shirt ... from Image 1 on the model in the video
 
-https://github.com/user-attachments/assets/e887d087-af71-4de1-b5d3-bbfbd32922d8
-
+https://github.com/user-attachments/assets/106d25dc-c569-485f-bdab-4d3fd7f35a56
 
 ## 📦 Model Download
 
