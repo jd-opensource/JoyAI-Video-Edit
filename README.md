@@ -5,6 +5,7 @@
   <a href="https://arxiv.org/abs/2608.03974"><img src="https://img.shields.io/badge/Paper-arXiv-red" alt="Paper"></a>
   <a href="https://huggingface.co/jdopensource/JoyAI-Video-Edit"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Checkpoint-JoyAI--Video--Edit-yellow" alt="Hugging Face"></a>
   <a href="https://huggingface.co/spaces/wxDai/joyai-video-edit"><img src="https://img.shields.io/badge/%F0%9F%9A%80%20Demo-Streaming--V2V-orange" alt="Demo"></a>
+  <a href="https://cloud.swmgpu.com/w/samofvaani/joyai-qwen-text-video-edit"><img src="https://img.shields.io/badge/swm%20cloud-Run%20ComfyUI%20Workspace-0A84FF" alt="swm cloud"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
 </p>
 
@@ -120,6 +121,8 @@ deploy/deps/checkpoints/JoyAI-Video-Edit/
 <a id="quick-start"></a>
 
 ## 🚀 Quick Start
+
+> **1-click cloud GPU (**swm cloud**):** Launch pre-loaded ComfyUI workspaces with weights and starter workflows ready on boot — [Text-Prompt Video Editor (JoyAI-Video-Edit + Qwen-Video-Edit)](https://cloud.swmgpu.com/w/samofvaani/joyai-qwen-text-video-edit) and [Instruction Image Editing Suite (Boogu-Image + JoyAI + HiDream-O1)](https://cloud.swmgpu.com/w/samofvaani/image-edit-suite).
 
 ### 1. Install
 
