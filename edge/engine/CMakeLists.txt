@@ -1,0 +1,36 @@
+cmake_minimum_required(VERSION 3.16)
+project(joyedge CXX C)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+# ggml checkout (https://github.com/ggml-org/ggml). CPU backend only.
+set(GGML_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml" CACHE PATH "path to a ggml checkout")
+if(NOT EXISTS "${GGML_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR "ggml not found at ${GGML_DIR}. Run edge/engine/build.sh or pass -DGGML_DIR=<ggml checkout>.")
+endif()
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+add_subdirectory(${GGML_DIR} ggml EXCLUDE_FROM_ALL)
+
+add_library(joyedge SHARED joyedge.cpp)
+target_include_directories(joyedge PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(joyedge PRIVATE ggml)
+set_target_properties(joyedge PROPERTIES CXX_VISIBILITY_PRESET hidden)
+if(NOT MSVC)
+    target_compile_options(joyedge PRIVATE -O3 -fopenmp-simd -Wall -Wextra -Wno-unused-parameter)
+    if(GGML_NATIVE)
+        target_compile_options(joyedge PRIVATE -march=native)
+    endif()
+endif()
+
+add_executable(joyedge-quantize quantize.cpp)
+target_link_libraries(joyedge-quantize PRIVATE ggml)
+
+add_executable(joyedge-bench bench.cpp)
+target_link_libraries(joyedge-bench PRIVATE joyedge)

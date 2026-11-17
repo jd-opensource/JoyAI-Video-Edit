@@ -864,6 +864,9 @@ class JoyOmniV2VStreamingSession:
         mti = GRAPH_WINDOW_CHUNKS - 1 if mti is None else mti
         if not graph_env_enabled() or self.chunk_size != 1:
             return
+        if torch.device(self.device).type != "cuda":
+            # CUDA-graph capture has no CPU / MPS equivalent: those devices stay on the eager path.
+            return
         if not self.settings.store_clean_self_only:
             return
         if not self.global_sink_chunk or self.local_window_size != GRAPH_WINDOW_CHUNKS:
