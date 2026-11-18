@@ -373,3 +373,22 @@ Key variables:
 | `JOYOMNI_PE_BACKEND` | `qwen` (default): local Qwen3.6-27B Marlin INT4 PE. `api`: external prompt-enhancement endpoint. `none`: disable PE without loading Qwen. |
 | `JOYOMNI_PE_CKPT` | Local Qwen directory (default `JOYOMNI_CKPT_ROOT/Qwen3.6-27B-GPTQ-Int4-FOEM`). |
 | `PE_MODEL` / `OPENAI_BASE_URL` / `OPENAI_API_KEY` | Used with `JOYOMNI_PE_BACKEND=api`. Prompt-enhancement endpoint: OpenAI-compatible, or Anthropic-protocol when the base URL contains `/anthropic` (key sent as `Authorization: Bearer`). If unset, the server falls back to the raw user prompt. |
+
+---
+
+## 5. CPU and edge devices
+
+The GPU path above is the supported real-time deployment. For machines without a
+suitable NVIDIA GPU see [`edge/README.md`](edge/README.md): a ggml-based CPU engine for
+the DiT (quantized GGUF weights, streamed from disk), benchmarks, and the measured
+limits of running a 16B model on a CPU.
+
+The server code itself no longer requires the CUDA extensions to import or run:
+
+| Variable | Meaning |
+| --- | --- |
+| `JOYOMNI_PORTABLE_OPS` | `1` forces the pure-PyTorch implementation of the fused DiT ops even on CUDA. It is selected automatically when `joyomni_ops` is not built or the tensors are not on a CUDA device. |
+| `JOYOMNI_PRECISION` | `bf16` (default), `fp16` or `fp32` for DiT, VAE and text encoder. Per component: `JOYOMNI_DIT_PRECISION`, `JOYOMNI_VAE_PRECISION`, `JOYOMNI_TEXT_ENCODER_PRECISION`. Use `fp32` on CPUs without AMX. |
+| `JOYOMNI_VAE_COMPILE` | `0` runs the VAE without `torch.compile` (CPU / MPS, fast start-up, debugging). |
+| `JOYOMNI_VAE_COMPILE_MODE` | `torch.compile` mode for the VAE (default `max-autotune-no-cudagraphs`). `default` skips the long autotuning search on first launch. |
+
