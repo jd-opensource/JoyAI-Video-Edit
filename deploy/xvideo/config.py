@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 import math
+import os
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,16 @@ from typing import Any
 _CKPT_ROOT = Path(__file__).resolve().parents[1] / "deps" / "checkpoints"
 _DEFAULT_VAE_PATH = _CKPT_ROOT / "JoyAI-Video-Edit" / "vae"
 _DEFAULT_TEXT_ENCODER_PATH = _CKPT_ROOT / "MiMo-VL-7B-RL-2508"
+
+
+def _precision(component: str) -> str:
+    """bf16 everywhere by default (GPU serving).  CPU / MPS runs usually want fp32:
+    set JOYOMNI_PRECISION=fp32, or per component JOYOMNI_{DIT,VAE,TEXT_ENCODER}_PRECISION."""
+    value = os.environ.get(f"JOYOMNI_{component}_PRECISION") or os.environ.get("JOYOMNI_PRECISION") or "bf16"
+    value = value.strip().lower()
+    if value not in {"fp32", "fp16", "bf16"}:
+        raise ValueError(f"unsupported precision {value!r} for {component} (use fp32, fp16 or bf16)")
+    return value
 
 
 @dataclass
@@ -37,12 +48,12 @@ class ExpConfig:
             },
         }
     )
-    dit_precision: str = "bf16"
+    dit_precision: str = field(default_factory=lambda: _precision("DIT"))
 
     vae_arch_config: dict[str, Any] = field(
         default_factory=lambda: {"pretrained": str(_DEFAULT_VAE_PATH)}
     )
-    vae_precision: str = "bf16"
+    vae_precision: str = field(default_factory=lambda: _precision("VAE"))
     enable_denormalization: bool = True
 
     text_encoder_arch_config: dict[str, Any] = field(
@@ -50,7 +61,7 @@ class ExpConfig:
             "params": {"text_encoder_ckpt": str(_DEFAULT_TEXT_ENCODER_PATH)},
         }
     )
-    text_encoder_precision: str = "bf16"
+    text_encoder_precision: str = field(default_factory=lambda: _precision("TEXT_ENCODER"))
     text_token_max_length: int = 1024
 
     pipeline_arch_config: dict[str, Any] = field(default_factory=lambda: {"params": {}})

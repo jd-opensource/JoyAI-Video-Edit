@@ -1,0 +1,4 @@
+engine/build/
+engine/third_party/
+__pycache__/
+*.gguf

@@ -166,6 +166,9 @@ def _sdpa_attention(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor)
     q = query.transpose(1, 2)
     k = key.transpose(1, 2)
     v = value.transpose(1, 2)
+    if not q.is_cuda:
+        # CPU / MPS: the CUDA backend priority list does not apply.
+        return F.scaled_dot_product_attention(q, k, v, is_causal=False).transpose(1, 2)
     with sdpa_kernel(_SDPA_BACKENDS, set_priority=True):
         out = F.scaled_dot_product_attention(q, k, v, is_causal=False)
     return out.transpose(1, 2)
@@ -173,6 +176,10 @@ def _sdpa_attention(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor)
 
 def _flash_attention4(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
     global _FA4_DISABLED
+    if _FA4_DISABLED:
+        # No FA4 on this machine: keep the caller's dtype (fp32 on CPU) instead of
+        # forcing a bf16 round-trip that only the FA4 kernel needs.
+        return _sdpa_attention(query, key, value)
     original_dtype = query.dtype
     if query.dtype not in (torch.float16, torch.bfloat16):
         query = query.to(torch.bfloat16)
