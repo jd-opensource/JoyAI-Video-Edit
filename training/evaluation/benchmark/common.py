@@ -14,6 +14,7 @@ import torch
 import torch.distributed as dist
 from tqdm import tqdm
 
+from evaluation.benchmark.paths import benchmark_stem, resolve_video_path
 from src.config import DEFAULT_VIDEO_RESOLUTION, VAE_TEMPORAL_FACTOR, load_config_class_from_pyfile, scale_spatial_buckets
 from src.distributed.parallel_states import clean_dist_env, init_distributed_environment
 from src.models import load_dit, load_pipeline
@@ -33,6 +34,7 @@ class BenchmarkItem:
     category: str
     prompt: str
     video_path: Path
+    source_prompt: str | None = None
 
 
 def build_parser(description: str, num_frames: int) -> argparse.ArgumentParser:
@@ -84,17 +86,14 @@ def load_items(metadata_path: Path, dataset_root: Path, categories: str = "all",
         if not source:
             raise ValueError(f"Missing video path in metadata row {row_index}.")
         prompt = str(row.get("prompt", "")).strip()
+        source_prompt = prompt
         if prompt_overrides is not None:
             prompt = prompt_overrides.get(source, prompt)
         if not prompt:
             skipped_prompts += 1
             continue
-        video_path = Path(source)
-        if not video_path.is_absolute():
-            if video_path.parts[0] == dataset_root.name:
-                video_path = Path(*video_path.parts[1:])
-            video_path = dataset_root / video_path
-        items.append(BenchmarkItem(category, prompt, video_path))
+        video_path = resolve_video_path(source, dataset_root)
+        items.append(BenchmarkItem(category, prompt, video_path, source_prompt))
     if skipped_prompts:
         logging.warning("Skipped %d metadata rows with empty prompts.", skipped_prompts)
     return items
@@ -212,6 +211,7 @@ def build_pipeline_kwargs(item, args, cfg, generator):
 
 
 def run_inference(args, items: list[BenchmarkItem]) -> None:
+    items = list(dict.fromkeys(items))
     if args.num_frames <= 0:
         raise ValueError("Frame count must be positive.")
     if args.max_items is not None:
@@ -236,10 +236,12 @@ def run_inference(args, items: list[BenchmarkItem]) -> None:
         assigned = items[data_rank::data_size]
         for item in tqdm(assigned, desc=f"rank {data_rank}", disable=data_rank != 0):
             output_dir = args.save_path / "fullset" / item.category
-            result_path = output_dir / f"{item.video_path.stem}.mp4"
-            source_path = output_dir / f"{item.video_path.stem}_src.mp4"
-            prompt_path = output_dir / f"{item.video_path.stem}_prompt.txt"
-            if all(path.is_file() and path.stat().st_size > 0 for path in (result_path, source_path, prompt_path)):
+            stem = benchmark_stem(item.video_path, item.prompt if item.source_prompt is None else item.source_prompt)
+            result_path = output_dir / f"{stem}.mp4"
+            source_path = output_dir / f"{stem}_src.mp4"
+            prompt_path = output_dir / f"{stem}_prompt.txt"
+            if (all(path.is_file() and path.stat().st_size > 0 for path in (result_path, source_path, prompt_path))
+                    and prompt_path.read_text(encoding="utf-8").strip() == item.prompt.strip()):
                 continue
             generator = torch.Generator(device=device).manual_seed(args.seed)
             pipeline_kwargs, source_pixels = build_pipeline_kwargs(item, args, cfg, generator)

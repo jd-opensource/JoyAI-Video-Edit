@@ -303,6 +303,7 @@ import json
 import mimetypes
 import os
 import subprocess
+import sys
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -311,6 +312,8 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from tqdm import tqdm
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from evaluation.benchmark.paths import benchmark_stem, resolve_video_path as resolve_source_path
 from src.config import VAE_SPATIAL_FACTOR, scale_spatial_buckets
 
 
@@ -473,11 +476,12 @@ def normalize_edited_type(edited_type: str) -> str:
     return TASK_ALIASES.get(edited_type, edited_type)
 
 
-def build_edited_video_path(save_dir: Path, edited_type: str, original_video: str) -> Path:
+def build_edited_video_path(save_dir: Path, edited_type: str, original_video: str, prompt: str, dataset_root: Path) -> Path:
     original_path = Path(original_video)
     stem = original_path.stem
     plain_stem = stem.removesuffix("_rife_3x_slowmo")
     candidates = [
+        save_dir / "fullset" / edited_type / f"{benchmark_stem(resolve_source_path(original_video, dataset_root), prompt)}.mp4",
         save_dir / "fullset" / edited_type / original_path.name,
         save_dir / "fullset" / edited_type / f"{stem}.mp4",
         save_dir / "fullset" / edited_type / f"{plain_stem}.mp4",
@@ -494,15 +498,6 @@ def build_edited_video_path(save_dir: Path, edited_type: str, original_video: st
         if candidate.exists():
             return candidate
     return candidates[0]
-
-
-def resolve_source_path(original_video: str, dataset_root: Path) -> Path:
-    path = Path(original_video)
-    if path.is_absolute():
-        return path
-    if path.parts and path.parts[0] == dataset_root.name:
-        path = Path(*path.parts[1:])
-    return dataset_root / path
 
 
 def build_source_video_path(
@@ -802,10 +797,12 @@ if __name__ == '__main__':
                     video_path = build_manifest_source_video_path(row, dataset_root)
                     video_id = row.get('video_id') or Path(video_path).stem
                 else:
-                    edited_video_path = build_edited_video_path(save_dir, edited_type, row['original_video'])
-                    video_path = build_source_video_path(
-                        save_dir, edited_type, row['original_video'], dataset_root, args.source_from_dataset,
-                    )
+                    edited_video_path = build_edited_video_path(save_dir, edited_type, row['original_video'], prompt, dataset_root)
+                    video_path = edited_video_path.with_name(edited_video_path.stem + "_src.mp4")
+                    if args.source_from_dataset or not video_path.is_file():
+                        video_path = build_source_video_path(
+                            save_dir, edited_type, row['original_video'], dataset_root, args.source_from_dataset,
+                        )
                     video_id = Path(row['original_video']).stem
                 if not edited_video_path.is_file():
                     print(f"Missing edited video, skip: {edited_video_path}")

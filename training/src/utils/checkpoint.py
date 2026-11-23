@@ -1,6 +1,8 @@
 from pathlib import Path
+import random
 import re
 
+import numpy as np
 import torch
 from torch.distributed.checkpoint.state_dict import (StateDictOptions,
                                                      get_model_state_dict,
@@ -14,6 +16,36 @@ from src.utils.logging import get_logger
 _SAVE_OPTIONS = StateDictOptions(full_state_dict=True, cpu_offload=True)
 _LOAD_OPTIONS = StateDictOptions(
     full_state_dict=True, broadcast_from_rank0=True)
+
+
+def save_rng_state(path: Path, rngs: dict) -> None:
+    numpy_state = np.random.get_state()
+    torch.save({
+        "rngs": {name: rng.get_state() if isinstance(rng, torch.Generator) else rng.getstate()
+                 for name, rng in rngs.items()},
+        "torch": torch.get_rng_state(),
+        "cuda": torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
+        "python": random.getstate(),
+        "numpy": (numpy_state[0], numpy_state[1].tolist(), *numpy_state[2:]),
+    }, path)
+
+
+def load_rng_state(path: Path, rngs: dict) -> None:
+    if not path.is_file():
+        get_logger().warning(f"RNG state is missing; random sequences will restart: {path}")
+        return
+    state = torch.load(path, map_location="cpu", weights_only=True)
+    for name, rng in rngs.items():
+        if isinstance(rng, torch.Generator):
+            rng.set_state(state["rngs"][name])
+        else:
+            rng.setstate(state["rngs"][name])
+    torch.set_rng_state(state["torch"])
+    if state["cuda"] is not None:
+        torch.cuda.set_rng_state(state["cuda"])
+    random.setstate(state["python"])
+    numpy_state = state["numpy"]
+    np.random.set_state((numpy_state[0], np.asarray(numpy_state[1], dtype=np.uint32), *numpy_state[2:]))
 
 
 def resolve_checkpoint_path(path: str | Path) -> Path:
@@ -51,7 +83,8 @@ def save_checkpoint(
     global_rank: int,
     optimizer: torch.optim.Optimizer = None,
     scheduler: torch.optim.lr_scheduler._LRScheduler = None,
-    dataloader: StatefulDataLoader = None
+    dataloader: StatefulDataLoader = None,
+    rngs: dict | None = None,
 ) -> None:
     logger = get_logger()
 
@@ -76,12 +109,14 @@ def save_checkpoint(
         torch.save(state_dict, ckpt_path)
 
     if dataloader is not None:
-        save_path = save_path / 'dataloader'
-        save_path.mkdir(parents=True, exist_ok=True)
-        dataloader_path = save_path / \
+        dataloader_dir = save_path / 'dataloader'
+        dataloader_dir.mkdir(parents=True, exist_ok=True)
+        dataloader_path = dataloader_dir / \
             f"dataloader_step{step}_rank{global_rank}.pth"
         state_dict = {"dataloader": dataloader.state_dict()}
         torch.save(state_dict, dataloader_path)
+    if rngs is not None:
+        save_rng_state(save_path / f"rng_rank{global_rank}.pth", rngs)
 
 
 def load_checkpoint(

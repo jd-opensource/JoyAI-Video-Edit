@@ -13,8 +13,11 @@ import mimetypes
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import sys
 from openai import OpenAI
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from evaluation.benchmark.paths import benchmark_stem, resolve_video_path
 
 API_KEY = os.environ.get("GEMINI_API_KEY", "")
 BASE_URL = os.environ.get("GEMINI_BASE_URL", "https://modelservice.jdcloud.com/v1")
@@ -292,8 +295,11 @@ def build_original_eval_csv(csv_path, save_dir, dataset_root, output_csv_path, t
                 continue
             if edited_type not in TASK_PROMPTS:
                 continue
-            original_name = Path(row.get('original_video', '')).stem + ".mp4"
-            edited_path = Path(save_dir) / "fullset" / edited_type / original_name
+            original_path = resolve_video_path(row.get('original_video', ''), Path(dataset_root))
+            stem = benchmark_stem(original_path, row.get('prompt', ''))
+            edited_path = Path(save_dir) / "fullset" / edited_type / f"{stem}.mp4"
+            if not edited_path.exists():
+                edited_path = edited_path.with_name(original_path.stem + ".mp4")
             source_path = edited_path.with_name(edited_path.stem + "_src.mp4")
             if not edited_path.exists() or not source_path.exists():
                 continue

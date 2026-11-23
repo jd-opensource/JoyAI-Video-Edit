@@ -520,22 +520,12 @@ class ImageVideoWebDataset(IterableDataset):
                 pixel, bucket_id = self._process_multiple_images(
                     images[1:], use_rec_aug=False)
             else:
-                if self.rng.random() < self.rec_aug_rate:
-                    use_rec_aug = True
-
-                    def replace_caption_text(caption: np.str_, new_text: str):
-                        caption_str = str(caption)
-                        replaced = re.sub(
-                            r"(<image>\n)(.*?)(<\|im_end\|>)",
-                            rf"\1{new_text}\3",
-                            caption_str,
-                            flags=re.DOTALL
-                        )
-                        return np.str_(replaced)
-                    caption = replace_caption_text(
-                        caption=caption, new_text="Reconstruct this image.")
-                else:
-                    use_rec_aug = False
+                use_rec_aug = self.rng.random() < self.rec_aug_rate
+                if use_rec_aug:
+                    caption, replacements = re.subn(
+                        r"(<image>\n).*?(<\|im_end\|>)", r"\1Reconstruct this image.\2", str(caption), flags=re.DOTALL,
+                    )
+                    caption = np.str_(caption if replacements else "Reconstruct this image.")
                 pixel, bucket_id = self._process_multiple_images(images, use_rec_aug)
         elif mode == "image":
             pixel, bucket_id = self._process_image(single_image)

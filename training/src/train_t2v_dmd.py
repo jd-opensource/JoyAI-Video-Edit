@@ -41,7 +41,7 @@ from src.train_t2v import (
     sample_noise_and_timestep,
 )
 from src.utils import find_latest_checkpoint, seed_everything
-from src.utils.checkpoint import load_dataloader_state, resolve_checkpoint_path
+from src.utils.checkpoint import load_dataloader_state, resolve_checkpoint_path, save_rng_state, load_rng_state
 from src.utils.activation_checkpointing import apply_activation_checkpointing
 from src.utils.constants import PRECISION_TO_TYPE
 from src.utils.fsdp_load import maybe_load_fsdp_model
@@ -1107,7 +1107,7 @@ def generate_dmd_latents(
     cfg: ExpConfig,
     pipeline: Any,
     generator_model: torch.nn.Module,
-    latent_shape_like: torch.Tensor,
+    latent_shape: tuple[int, int, int, int, int],
     prompt_embeds: torch.Tensor,
     prompt_embeds_mask: torch.Tensor | None,
     additional_inputs: dict[str, Any],
@@ -1121,10 +1121,9 @@ def generate_dmd_latents(
     """Generate random-exit rollouts; return latents, score inputs, and whether backward ran."""
     generator_adapter = dmd_generator_adapter_name(cfg) if dmd_uses_lora(cfg) else None
     activate_lora_adapter(generator_model, generator_adapter)
-    device = latent_shape_like.device
+    device = pipeline.vae.device
     num_inference_steps = int(getattr(cfg, "dmd_generator_num_inference_steps", 2))
-    pipeline.scheduler.set_timesteps(num_inference_steps, device=device)
-    input_frames = latent_shape_like.shape[2]
+    input_frames = latent_shape[2]
     chunk_size = pipeline._resolve_streaming_chunk_size(getattr(cfg, "dmd_generator_chunk_size", None))
     rollout_chunks = rollout_num_chunks_override
     if rollout_chunks is None:
@@ -1136,7 +1135,7 @@ def generate_dmd_latents(
         rollout_chunks = -1
     use_long_rollout = rollout_chunks > 0
     total_frames = rollout_chunks * chunk_size if use_long_rollout else input_frames
-    context_shape = list(latent_shape_like.shape)
+    context_shape = list(latent_shape)
     context_shape[2] = total_frames
     context_latents = torch.randn(context_shape, generator=noise_generator_cuda, device=device, dtype=torch.float32)
 
@@ -1285,6 +1284,7 @@ def save_dmd_checkpoint(
     generator_scheduler: Any | None = None,
     fake_score_scheduler: Any | None = None,
     dataloader: Any | None = None,
+    rngs: dict | None = None,
 ) -> None:
     save_path = Path(save_dir) / f"global_step{step}"
     save_path.mkdir(parents=True, exist_ok=True)
@@ -1345,6 +1345,8 @@ def save_dmd_checkpoint(
             {"dataloader": dataloader.state_dict()},
             dataloader_dir / f"dataloader_step{step}_rank{global_rank}.pth",
         )
+    if rngs is not None:
+        save_rng_state(save_path / f"rng_rank{global_rank}.pth", rngs)
 
 
 def load_dmd_checkpoint(
@@ -1569,6 +1571,7 @@ def main(cfg: ExpConfig):
     noise_generator_cpu = torch.Generator(device="cpu").manual_seed(noise_seed)
     noise_generator_cuda = torch.Generator(device="cuda").manual_seed(noise_seed)
     rng = random.Random(noise_seed)
+    rngs = {"noise_cpu": noise_generator_cpu, "noise_cuda": noise_generator_cuda, "conditioning": rng}
 
     step_times: deque[float] = deque(maxlen=100)
     data_times: deque[float] = deque(maxlen=100)
@@ -1576,6 +1579,8 @@ def main(cfg: ExpConfig):
     gc.disable()
 
     train_data_iterator = iter(train_dataloader)
+    if cfg.resume_from_checkpoint is not None:
+        load_rng_state(resolve_checkpoint_path(cfg.resume_from_checkpoint).parent / f"rng_rank{global_rank}.pth", rngs)
     for step in range(init_step + 1, cfg.max_train_steps + 1):
         train_generator = step % getattr(cfg, "dmd_fake_gen_update_ratio", 5) == 0
         log_step = step % cfg.log_interval == 0
@@ -1611,7 +1616,7 @@ def main(cfg: ExpConfig):
                 data_times.append(last_data_time)
 
                 preprocess_start_time = time.perf_counter()
-                latents, prompt_embeds, prompt_embeds_mask, additional_inputs = prepare_inputs(
+                _, prompt_embeds, prompt_embeds_mask, additional_inputs = prepare_inputs(
                     pixel_values=batch["pixel"],
                     caption=batch["caption"],
                     pipeline=pipeline,
@@ -1619,12 +1624,12 @@ def main(cfg: ExpConfig):
                     rng=rng,
                     generator=noise_generator_cuda,
                     ref_image_pixels=batch.get("ref_image_pixel"),
+                    encode_target=False,
                 )
-                target_latents = latents[:, -1]
                 negative_prompt_embeds, negative_prompt_embeds_mask = encode_negative_prompt(
                     cfg,
                     pipeline,
-                    batch_size=target_latents.shape[0],
+                    batch_size=additional_inputs["target_shape"][0],
                     task_type=additional_inputs["task_type"],
                     pixel_values=batch["pixel"],
                 )
@@ -1663,7 +1668,7 @@ def main(cfg: ExpConfig):
                     cfg,
                     pipeline,
                     generator_model,
-                    target_latents,
+                    additional_inputs["target_shape"],
                     prompt_embeds,
                     prompt_embeds_mask,
                     additional_inputs,
@@ -1728,7 +1733,7 @@ def main(cfg: ExpConfig):
             data_times.append(last_data_time)
 
             preprocess_start_time = time.perf_counter()
-            latents, prompt_embeds, prompt_embeds_mask, additional_inputs = prepare_inputs(
+            _, prompt_embeds, prompt_embeds_mask, additional_inputs = prepare_inputs(
                 pixel_values=batch["pixel"],
                 caption=batch["caption"],
                 pipeline=pipeline,
@@ -1736,8 +1741,8 @@ def main(cfg: ExpConfig):
                 rng=rng,
                 generator=noise_generator_cuda,
                 ref_image_pixels=batch.get("ref_image_pixel"),
+                encode_target=False,
             )
-            target_latents = latents[:, -1]
             last_preprocess_time = time.perf_counter() - preprocess_start_time
             preprocess_times.append(last_preprocess_time)
 
@@ -1775,7 +1780,7 @@ def main(cfg: ExpConfig):
                 cfg,
                 pipeline,
                 generator_model,
-                target_latents,
+                additional_inputs["target_shape"],
                 prompt_embeds,
                 prompt_embeds_mask,
                 additional_inputs,
@@ -1785,7 +1790,6 @@ def main(cfg: ExpConfig):
                 group_backward_fn=_critic_group_backward,
             )
 
-            torch.cuda.empty_cache()
             if grouped_backward:
                 loss_value = grouped_fake_loss_sum
             else:
@@ -1880,6 +1884,7 @@ def main(cfg: ExpConfig):
                 generator_scheduler=generator_lr_scheduler,
                 fake_score_scheduler=fake_score_lr_scheduler,
                 dataloader=train_dataloader,
+                rngs=rngs,
             )
             if global_rank == 0:
                 torch.save(

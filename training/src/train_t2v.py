@@ -10,6 +10,7 @@ from datetime import datetime
 import random
 from typing import Any
 
+from PIL import Image
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
@@ -34,7 +35,7 @@ from src.utils import (
 from src.utils.logging import setup_logger
 from src.utils.training import backward_if_finite, build_token_timesteps, log_bucket_batch_sizes, step_optimizer, synchronize_batch_frames
 from src.utils.activation_checkpointing import apply_activation_checkpointing
-from src.utils.checkpoint import load_checkpoint, save_checkpoint
+from src.utils.checkpoint import load_checkpoint, save_checkpoint, load_rng_state, resolve_checkpoint_path
 
 
 SUPPORTED_FORCING_STRATEGIES = ("teacher_forcing", "resampling_forcing")
@@ -62,10 +63,10 @@ def infer_task_type(num_items: int, num_frames: int) -> str:
     return "t2v" if num_items == 1 else "v2v"
 
 
-def build_multi_item_prompt_images(pixel_values: torch.Tensor) -> torch.Tensor:
-    prompt_images = (pixel_values[:, :-1, :, 0] + 1) * 127.5
-    prompt_images = rearrange(prompt_images, "b n c h w -> (b n) c h w")
-    return prompt_images
+def build_multi_item_prompt_images(pixel_values: torch.Tensor) -> list[Image.Image]:
+    prompt_images = (pixel_values[:, :-1, :, 0].detach().float() + 1) * 127.5
+    prompt_images = rearrange(prompt_images, "b n c h w -> (b n) h w c")
+    return [Image.fromarray(image) for image in prompt_images.clamp(0, 255).round().to(torch.uint8).cpu().numpy()]
 
 
 def _sample_sigmas_scalar(
@@ -332,27 +333,27 @@ def prepare_inputs(
     rng: random.Random,
     generator: torch.Generator = None,
     ref_image_pixels: list[torch.Tensor | None] | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, dict[str, Any]]:
+    encode_target: bool = True,
+) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor | None, dict[str, Any]]:
     device = pipeline.vae.device
     dtype = pipeline.vae.dtype
-    batch_size, num_items, _, num_frames, _, _ = pixel_values.shape
-
-    pixel_values = pixel_values.to(dtype=dtype, device=device)
-    pixel_values_fused = rearrange(
-        pixel_values, "b n c t h w -> (b n) c t h w")
-
-    latents = pipeline._sample_vae_latents(
-        pixel_values_fused, enable_denormalization=cfg.enable_denormalization, generator=generator,
-    )
-
-    latents = rearrange(latents, "(b n) c t h w -> b n c t h w", b=batch_size)
+    batch_size, num_items, _, num_frames, height, width = pixel_values.shape
+    encoded_pixels = pixel_values if encode_target else pixel_values[:, :-1]
+    latents = None
+    if encoded_pixels.shape[1]:
+        encoded_pixels = rearrange(encoded_pixels.to(dtype=dtype, device=device), "b n c t h w -> (b n) c t h w")
+        latents = pipeline._sample_vae_latents(
+            encoded_pixels, enable_denormalization=cfg.enable_denormalization, generator=generator,
+        )
+        latents = rearrange(latents, "(b n) c t h w -> b n c t h w", b=batch_size)
 
     task_type = infer_task_type(num_items=num_items, num_frames=num_frames)
     is_image = task_type == "t2i"
     is_video = task_type == "t2v"
     is_multi_item = task_type in {"i2i", "v2v"}
 
-    ref_video_latent = rearrange(latents[:, :-1], "b n c t h w -> b c (n t) h w") if is_multi_item else None
+    source_latents = latents[:, :-1] if encode_target and is_multi_item else latents
+    ref_video_latent = rearrange(source_latents, "b n c t h w -> b c (n t) h w") if is_multi_item else None
     ref_image_latents = None
     if is_multi_item and ref_image_pixels is not None and any(p is not None for p in ref_image_pixels):
         ref_image_latents = []
@@ -408,6 +409,14 @@ def prepare_inputs(
         "ref_video_latent": ref_video_latent,
         "ref_image_latent": ref_image_latents,
     }
+    if not encode_target:
+        spatial, temporal = pipeline.vae.ffactor_spatial, pipeline.vae.ffactor_temporal
+        if (num_frames - 1) % temporal or height % spatial or width % spatial:
+            raise ValueError("Target dimensions must match the VAE spatial and temporal factors.")
+        additional_inputs["target_shape"] = (
+            batch_size, pipeline.vae.config.latent_channels, (num_frames - 1) // temporal + 1,
+            height // spatial, width // spatial,
+        )
     return latents, prompt_embeds, prompt_embeds_mask, additional_inputs
 
 
@@ -588,6 +597,7 @@ def main(cfg: ExpConfig):
     noise_generator_cuda = torch.Generator(
         device="cuda").manual_seed(noise_seed)
     rng = random.Random(noise_seed)
+    rngs = {"noise_cpu": noise_generator_cpu, "noise_cuda": noise_generator_cuda, "conditioning": rng}
 
     step_times: deque[float] = deque(maxlen=100)
     data_times: deque[float] = deque(maxlen=100)
@@ -596,6 +606,8 @@ def main(cfg: ExpConfig):
     gc.disable()
 
     train_data_iterator = iter(train_dataloader)
+    if cfg.resume_from_checkpoint is not None:
+        load_rng_state(resolve_checkpoint_path(cfg.resume_from_checkpoint).parent / f"rng_rank{global_rank}.pth", rngs)
     for step in range(init_step + 1, cfg.max_train_steps + 1):
         record_loss = {'Loss/train_loss': 0.0}
         log_step = step % cfg.log_interval == 0
@@ -700,6 +712,7 @@ def main(cfg: ExpConfig):
                 optimizer=optimizer,
                 scheduler=lr_scheduler,
                 dataloader=train_dataloader,
+                rngs=rngs,
             )
 
         if step % cfg.gc_interval == 0:

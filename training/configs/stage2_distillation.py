@@ -135,7 +135,7 @@ class Stage2DistillationConfig(ExpConfig):
     num_workers: int = 0
     fps: int = 24
     weighting_scheme: str = "lognorm"
-    train_flow_shift: float = 5.0
+    train_flow_shift: float = 5.159
     cfg_rate: float = 0.0
     max_train_steps: int = 10000000000
     gradient_accumulation_steps: int = 1
@@ -153,8 +153,6 @@ class Stage2DistillationConfig(ExpConfig):
     use_vit: bool = True
     enable_activation_checkpointing: bool = True
     activation_checkpointing_skip_interval: int = 1
-    causal_forcing_strategy: str = "teacher_forcing"
-    teacher_forcing_noise_max_sigma: float = 0.003
     num_inference_steps: int = 2
     guidance_scale: float = 1.0
     store_clean_only_self: bool = True

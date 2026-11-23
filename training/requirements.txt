@@ -1,5 +1,5 @@
 # Install after the environment described in the root README.
-datasets==4.4.2
+datasets==3.6.0
 decord==0.6.0
 torchdata==0.11.0
 tensorboard>=2.20,<3
