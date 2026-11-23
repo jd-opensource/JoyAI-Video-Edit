@@ -150,6 +150,12 @@ http://localhost:8080
 
 The server binds `0.0.0.0:8080` by default — for remote machines, just open the port (or use SSH port forwarding).
 
+## 🧩 Community Integrations
+
+Community projects built on JoyAI-Video-Edit. They are not maintained or endorsed by the JoyAI-Video-Edit team; please report issues to each project.
+
+- **ComfyUI:** [ComfyUI-JoyAI-Video-Edit](https://github.com/hiroki-abe-58/ComfyUI-JoyAI-Video-Edit) — an unofficial integration that runs the model in a persistent WSL2 worker. Validated only with this repository at commit `ca17e1d` and the `0811` checkpoint, on Windows 11 + WSL2 with a GeForce RTX 5090 (32 GB); current `main` and JoyAI-Video-Edit-1.1 are not tested yet.
+
 ## 📚 Citation
 
 If JoyAI-Video-Edit is useful for your research or product prototype, please cite:
